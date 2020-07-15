@@ -1,4 +1,10 @@
 ### Exact-K Recommendation via Maximal Clique Optimization
+
+使用ml100k-10c的数据, python2运行:
+mkdir logdir
+python train.py
+
+
 Please cite:
 ```
 @inproceedings{gong2019exact,

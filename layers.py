@@ -317,7 +317,8 @@ def ptn_rnn_decoder(cell,
                 state = beam_select(state, last_beam_id)
                 point_mask = beam_select(point_mask, last_beam_id)
                 output_idx = tf.unstack(output_idx, axis=1)  # [batch] * beam_size
-                point_mask = [update_mask(output_idx[i], point_mask[i]) for i in range(beam_size)]
+                #point_mask = [update_mask(output_idx[i], point_mask[i]) for i in range(beam_size)]
+                point_mask = [update_mask(output_idx[i], point_mask[i]) for i in xrange(beam_size)]
 
                 l_output_idx = [tf.expand_dims(t, axis=1)  # [batch, 1] * beam_size
                                 for t in output_idx]
@@ -361,7 +362,7 @@ def trainable_initial_state(batch_size,
     else:
         flat_initializer = tuple(tf.zeros_initializer for initializer in flat_state_size)
 
-    names = ["{}_{}".format(name, i) for i in xrange(len(flat_state_size))]
+    names = ["{}_{}".format(name, i) for i in range(len(flat_state_size))]
     tiled_states = []
 
     # tiled_ta = tf.ones(shape=[batch_size])
