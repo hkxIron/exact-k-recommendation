@@ -1,6 +1,6 @@
 import random
 
-
+# 数据shuffle后保存在train/test
 data_all = []
 
 with open('rerank_data_10c.txt', 'r') as fin:

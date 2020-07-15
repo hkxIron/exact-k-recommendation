@@ -1,5 +1,19 @@
 ### Exact-K Recommendation via Maximal Clique Optimization
 
+rerank_data_10c.txt :
+格式:userid item_ids item_ids, 第一个item_ids为最终选出的item_id,第二个item_ids为候选item_id
+1	202,185,222,104,68,34,151,49,157,136	259,4,262,135,136,140,158,143,145,146,149,151,24,260,155,29,30,159,34,164,241,157,49,222,184,185,186,63,66,68,69,202,162,211,215,90,94,226,227,229,103,104,107,112,232,116,249,123,252,125
+
+rerank_data_10c_train.txt :
+格式:userid item_ids item_ids
+
+rerank_data_10c_test.txt :
+格式:userid item_ids item_ids
+
+dis_data_10c_test.txt:
+666	506,186,924,129,114,258,143,684,974,709	1
+
+
 使用ml100k-10c的数据, python2运行:
 mkdir logdir
 python train.py
