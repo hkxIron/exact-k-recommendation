@@ -31,6 +31,7 @@ class Generator():
         # Encoder
         with tf.variable_scope("encoder"):
             ## Embedding
+            # user: [batch]
             # enc_user = [batch_size, hidden_units]
             self.enc_user = embedding(self.user,
                                       vocab_size=len(user2idx),
@@ -39,6 +40,7 @@ class Generator():
                                       scale=True,
                                       scope="enc_user_embed",
                                       reuse=not is_training)
+            # item_cand:[batch, seq_len]
             # enc_item = [batch_size, seq_len, hidden_units]
             self.enc_item = embedding(self.item_cand,
                                       vocab_size=len(item2idx),
@@ -47,6 +49,8 @@ class Generator():
                                       scale=True,
                                       scope='enc_item_embed',
                                       reuse=not is_training)
+            # enc: [batch, hidden_units*seq_len]
+            # enc_item = [batch_size, seq_len, hidden_units]
             self.enc = tf.concat([tf.stack(hp.seq_length * [self.enc_user], axis=1), self.enc_item], axis=2)
 
             ## Dropout

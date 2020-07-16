@@ -11,7 +11,9 @@ rerank_data_10c_test.txt :
 格式:userid item_ids item_ids
 
 dis_data_10c_test.txt:
+格式:userid item_ids label, label代表userid对item_ids是否感兴趣
 666	506,186,924,129,114,258,143,684,974,709	1
+
 
 
 使用ml100k-10c的数据, python2运行:

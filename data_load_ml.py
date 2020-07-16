@@ -1,3 +1,4 @@
+# coding:utf-8
 from __future__ import print_function
 from hyperparams import Hyperparams as hp
 import tensorflow as tf
@@ -30,7 +31,7 @@ def load_gen_data(file_path):
             USER.append(user2idx[int(strs[0])])
             card_ = [item2idx[int(x)] for x in strs[1].split(',')]
             CARD.append(card_)
-            item_cand_ = sorted([item2idx[int(x)] for x in strs[2].split(',')])
+            item_cand_ = sorted([item2idx[int(x)] for x in strs[2].split(',')]) # candidate item
             ITEM_CAND.append(item_cand_) # sorted
             ITEM_POS.append(card_[0])
 
@@ -39,6 +40,7 @@ def load_gen_data(file_path):
                 item_cand_idx_map[item] = idx
             card_idx_ = [item_cand_idx_map[item] for item in card_]
             CARD_IDX.append(card_idx_)
+
             '''
             tmp = set(strs[2].split(','))
             tmp.remove(strs[1].split(',')[0])
@@ -88,7 +90,7 @@ def get_gen_batch_data(is_training=True):
     return user, card, card_idx, item_cand, item_pos, num_batch
 
 #####################################
-
+# 一条样本被拆为多条样本, 并且进行shuffle
 def load_dis_data(file_path):
     user2idx, _ = load_user_vocab()
     item2idx, _ = load_item_vocab()
