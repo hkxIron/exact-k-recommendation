@@ -4,6 +4,15 @@ import tensorflow as tf
 import numpy as np
 
 
+# input:
+# [[3,1,2],
+#  [2,3,1]] -> [[[0, 3], [0, 1], [0, 2]], # 0代表第0个样本, 即 c[i,j,:] = [i,a[i,j]]
+#               [[1, 2], [1, 3], [1, 1]]] # 1代表第1个样本
+#
+# input:
+# [3,1,4] => [[0,3], # [sample_index, seq_index]
+#             [1,1],
+#             [2,4]]
 def index_matrix_to_pairs_fn(batch_size, seq_length):
     replicated_first_indices = tf.range(batch_size)  # range(128)
     # replicated_first_indices =

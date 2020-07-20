@@ -30,24 +30,27 @@ except:
     # dynamic_rnn_decoder = tf.contrib.seq2seq.dynamic_rnn_decoder
     # simple_decoder_fn_train = tf.contrib.seq2seq.simple_decoder_fn_train
 
-def ptn_rnn_decoder(cell,
-                    decoder_target_ids,
-                    enc_outputs,
-                    enc_final_states,
-                    seq_length,
-                    res_length,
-                    hidden_dim,
-                    num_glimpse,
-                    batch_size,
-                    initializer=None,
-                    mode="SAMPLE",
-                    reuse=False,
-                    beam_size=None):
+"""
+pointer-network decoder
+"""
+def pointer_network_rnn_decoder(cell,
+                                decoder_target_ids,
+                                enc_outputs,
+                                enc_final_states,
+                                seq_length,
+                                res_length,
+                                hidden_dim,
+                                num_glimpse,
+                                batch_size,
+                                initializer=None,
+                                mode="SAMPLE",
+                                reuse=False,
+                                beam_size=None):
     """
     :param cell:
     :param decoder_target_ids:
-    :param enc_outputs:
-    :param enc_final_states:
+    :param enc_outputs: [batch, seq_len, 2*hidden_units]
+    :param enc_final_states: [batch_size, state_size]
     :param seq_length:
     :param hidden_dim:
     :param num_glimpse:
@@ -56,26 +59,27 @@ def ptn_rnn_decoder(cell,
     :param mode: SAMPLE/GREEDY/BEAMSEARCH/TRAIN, if TRAIN, decoder_input_ids shouldn't be none
     :param reuse:
     :param beam_size: a positive int if mode="BEAMSEARCH"
+
     :return: [logits, sampled_ids, final_state], shape: [batch_size, seq_len, data_len], [batch, seq_len], state_size
     """
     with tf.variable_scope("decoder_rnn") as scope:
         if reuse:
             scope.reuse_variables()
+        # first_decoder_input:[batch_size, hidden_dim]
+        first_decoder_input = trainable_initial_state(batch_size, hidden_dim, initializer=None, name="first_decoder_input")
 
-        first_decoder_input = trainable_initial_state(
-            batch_size, hidden_dim, initializer=None, name="first_decoder_input")
-
-        # 多次decode计算attention时，计算encoder*参数只计算一次
+        # 多次decode计算attention时，计算encoder参数只计算一次
         enc_refs = {}
         dec_qs = {}
         # 存储已经decoder的序列,用于计算intra-attention
         output_ref = []
+        # index_matrix_to_pairs: [batch_size, seq_length, 2], 最后的一维里的元素是: (sample_index, seq_index)
         index_matrix_to_pairs = index_matrix_to_pairs_fn(batch_size, seq_length)
 
         def intra_attention(bef, query, scope="intra_attention"):
             """
-             :param bef: decoder阶段的已输出序列[batch,decoder_len,hidden_dim] decoder_len为目前decoder的长度
-             :param query: decoder的输出
+             :param bef: decoder阶段的已输出序列[batch, decoder_len, hidden_dim] decoder_len为目前decoder的长度
+             :param query: decoder的输出, [batch, hidden_dim]
              :return: intra_attention:[batch,hidden_dim]
              """
             with tf.variable_scope(scope) as scope:
@@ -91,6 +95,7 @@ def ptn_rnn_decoder(cell,
                 bias_dec = tf.get_variable(
                     "bias_dec", [hidden_dim],
                     initializer=tf.zeros_initializer)
+
                 if len(bef) <= 1:
                     if len(bef) == 0:
                         return tf.zeros([batch_size, hidden_dim])
@@ -100,21 +105,37 @@ def ptn_rnn_decoder(cell,
                     bef = tf.stack(bef, axis=1)
                     # bef_rs = tf.reduce_sum(bef_s,axis=[2])
 
-                decoded_bef = tf.nn.conv1d(bef, W_bef, 1, "VALID",
+                """用一维卷积来计算全连接"""
+                # bef: [batch, decoder_len, hidden_dim]
+                # W_bef: filter_kernel:[in_width=1, in_channel=hidden_dim, output_channel=hidden_dim]
+                # decoded_bef:[batch, decoder_len, hidden_dim]
+                decoded_bef = tf.nn.conv1d(bef, W_bef, stride=1, padding="VALID",
                                            name="decoded_bef")  # [batch, decoder_len, hidden_dim]
+                # query:[batch, hidden_dim]
+                # W_b:[hidden_dim, hidden_dim]
+                # decoded_query:[batch, 1, hidden_dim]
                 decoded_query = tf.expand_dims(tf.matmul(query, W_b, name="decoded_query"), 1)  # [batch, 1, hidden_dim]
-                scores = tf.reduce_sum(v_dec * tf.tanh(decoded_bef + decoded_query + bias_dec),
-                                       [-1])  # [batch, decoder_len]
-                p1 = tf.nn.softmax(scores)
+                # decoded_bef:[batch, decoder_len, hidden_dim]
+                # decoded_query:[batch, 1, hidden_dim]
+                # bias_dec:[hidden_dim]
+                # v_dec:[hidden_dim]
+                # scores:[batch, decoder_len]
+                scores = tf.reduce_sum(v_dec * tf.tanh(decoded_bef + decoded_query + bias_dec), axis=[-1])  # [batch, decoder_len]
+                # scores:[batch, decoder_len]
+                # p1:[batch, decoder_len]
+                p1 = tf.nn.softmax(scores, axis=-1)
+                # aligments1:[batch, decoder_len, 1]
                 aligments1 = tf.expand_dims(p1, axis=2)
+                # bef: [batch, decoder_len, hidden_dim]
+                # return:[batch, hidden_dim], 序列内部各时间步attention加权平均
                 return tf.reduce_sum(aligments1 * bef, axis=[1])
 
         def attention(ref, query, dec_ref, with_softmax, scope="attention"):
             """
              :param ref: [batch, seq_length, hidden_dim]  encoder阶段的序列
+             :param query: [batch, hidden_dim] decoder的输出
              :param dec_ref: [batch,hidden_dim] decoder阶段的intra-decoder-attention的结果
-             :param query: [batch, hidden_dim]     decoder的输出
-             :return  attention: [batch, seq_length]
+             :return attention score: [batch, seq_length]
              """
             with tf.variable_scope(scope) as scope:
                 W_q = tf.get_variable(
@@ -134,16 +155,31 @@ def ptn_rnn_decoder(cell,
                 if enc_ref_key not in enc_refs:
                     W_ref = tf.get_variable("W_ref", [1, hidden_dim, hidden_dim],
                                             initializer=tf.contrib.layers.xavier_initializer())
+                    # ref: [batch, seq_length, hidden_dim]
+                    # W_ref:[1, hidden_dim, hidden_dim]
+                    # enc_refs[enc_ref_key]:[batch, seq_length, hidden_dim]
                     enc_refs[enc_ref_key] = tf.nn.conv1d(ref, W_ref, 1, "VALID",
                                                          name="encoded_ref")  # [batch, data_len, hidden_dim]
+                # encoded_ref:[batch, seq_length, hidden_dim]
                 encoded_ref = enc_refs[enc_ref_key]
-                encoded_query = tf.expand_dims(tf.matmul(query, W_q, name="encoded_query"), 1)  # [batch, 1, hidden_dim]
-                decoded_ref = tf.expand_dims(tf.matmul(dec_ref, W_dec, name="decoded_ref"), 1)  # [batch, 1, hidden_dim]
-                scores = tf.reduce_sum(v * tf.tanh(encoded_ref + encoded_query + decoded_ref + bias),
-                                       [-1])  # [batch, data_len]
+                # query: [batch, hidden_dim]
+                # W_q: [hidden_dim, hidden_dim]
+                # encoded_query:[batch,1, hidden_dim]
+                encoded_query = tf.expand_dims(tf.matmul(query, W_q, name="encoded_query"), axis=1)  # [batch, 1, hidden_dim], 乘以W_q是为了转换到attention空间
+                # dec_ref:[batch, hidden_dim]
+                # W_dec:[hidden_dim, hidden_dim]
+                # decoded_ref:[batch, 1, hidden_dim]
+                decoded_ref = tf.expand_dims(tf.matmul(dec_ref, W_dec, name="decoded_ref"), axis=1)  # [batch, 1, hidden_dim]
+                # v:[hidden_dim]
+                # encoded_ref:[batch, seq_length, hidden_dim]
+                # encoded_query:[batch, 1, hidden_dim]
+                # decoded_ref:[batch, hidden_dim]
+                # bias:[hidden_dim]
+                # scores:[batch, seq_length]
+                scores = tf.reduce_sum(v * tf.tanh(encoded_ref + encoded_query + decoded_ref + bias), axis=[-1])  # [batch, data_len]
 
                 if with_softmax:
-                    return tf.nn.softmax(scores)
+                    return tf.nn.softmax(scores, axis=-1)
                 else:
                     return scores
 
@@ -151,11 +187,16 @@ def ptn_rnn_decoder(cell,
             """
             :param ref: [batch, seq_length, hidden_dim]
             :param query: [batch, hidden_dim]
-            :param dec_ref: [batch,hidden_dim] decoder阶段的intra-decoder-attention的结果
+            :param dec_ref: [batch, hidden_dim] decoder阶段的intra-decoder-attention的结果
             :return g: [batch, hidden_dim]
             """
+            # p: [batch, seq_length]
             p = attention(ref, query, dec_ref, with_softmax=True, scope=scope)
-            alignments = tf.expand_dims(p, axis=2)  # [batch, data_len, 1]
+            # alignments: [batch, seq_length, 1]
+            alignments = tf.expand_dims(p, axis=2)
+            # alignments: [batch, seq_length, 1]
+            # ref:        [batch, seq_length, hidden_dim]
+            # return:     [batch, hidden_dim]
             return tf.reduce_sum(alignments * ref, axis=[1])
 
         def output_fn(ref, query, dec_ref, num_glimpse):
@@ -168,7 +209,9 @@ def ptn_rnn_decoder(cell,
             """
 
             for idx in range(num_glimpse):
+                # query: [batch, hidden_dim]
                 query = glimpse(ref, query, dec_ref, "glimpse_{}".format(idx))
+            # return: [batch, seq_length]
             return attention(ref, query, dec_ref, with_softmax=False, scope="attention")
 
         def input_fn(input_idx):
@@ -177,6 +220,7 @@ def ptn_rnn_decoder(cell,
             :param input_idx: [batch_size] or [batch_size, seq_length]
             :return: [batch_size, hidden_dim] or [batch_size, seq_length, hidden_dim]
             """
+
             # enc_outputs: [batch_size, seq_length, hidden_dim]
             # input_index_pairs: [batch_size, 2]
             # input_index_pairs = tf.stop_gradient(tf.stack(
@@ -350,7 +394,7 @@ def ptn_rnn_decoder(cell,
         else:
             raise NotImplementedError("unknown mode: %s. Available modes: [SAMPLE, TRAIN, GREEDY, BEAMSEARCH]" % mode)
 
-
+# 返回一个tensor, 如Tensor("my_init_state_0_tiled:0", shape=(3, 2), dtype=float32)
 def trainable_initial_state(batch_size,
                             state_size,
                             initializer=None,

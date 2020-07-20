@@ -14,15 +14,20 @@ from utils import *
 class Generator():
     def __init__(self, is_training=True):
 
+        # user:[batch]
         self.user = tf.placeholder(tf.int32, shape=(None,))
+        # item_cand: [batch, seq_length]
         self.item_cand = tf.placeholder(tf.int32, shape=(None, hp.seq_length))
+        # card_idx: [batch, result_length]
         self.card_idx = tf.placeholder(tf.int32, shape=(None, hp.res_length))
         # self.item_pos = tf.placeholder(tf.int32, shape=(None,))
+
         # define decoder inputs
+        # decode_target_ids: [batch, result_length]
         self.decode_target_ids = tf.placeholder(dtype=tf.int32, shape=[hp.batch_size, hp.res_length],
                                                 name="decoder_target_ids")  # [batch_size, res_length]
-        self.reward = tf.placeholder(dtype=tf.float32, shape=[hp.batch_size],
-                                     name="reward")  # [batch_size]
+        # reward:[batch]
+        self.reward = tf.placeholder(dtype=tf.float32, shape=[hp.batch_size], name="reward")  # [batch_size]
 
         # Load vocabulary
         user2idx, idx2user = load_user_vocab()
@@ -32,7 +37,7 @@ class Generator():
         with tf.variable_scope("encoder"):
             ## Embedding
             # user: [batch]
-            # enc_user = [batch_size, hidden_units]
+            # enc_user = [batch, hidden_units]
             self.enc_user = embedding(self.user,
                                       vocab_size=len(user2idx),
                                       num_units=hp.hidden_units,
@@ -41,7 +46,7 @@ class Generator():
                                       scope="enc_user_embed",
                                       reuse=not is_training)
             # item_cand:[batch, seq_len]
-            # enc_item = [batch_size, seq_len, hidden_units]
+            # enc_item = [batch, seq_len, hidden_units]
             self.enc_item = embedding(self.item_cand,
                                       vocab_size=len(item2idx),
                                       num_units=hp.hidden_units,
@@ -49,22 +54,28 @@ class Generator():
                                       scale=True,
                                       scope='enc_item_embed',
                                       reuse=not is_training)
-            # enc: [batch, hidden_units*seq_len]
+            # enc_user = [batch, hidden_units]
+            #          => [batch, seq_len, hidden_units], 将user embed复制了多份
             # enc_item = [batch_size, seq_len, hidden_units]
-            self.enc = tf.concat([tf.stack(hp.seq_length * [self.enc_user], axis=1), self.enc_item], axis=2)
+            # enc: [batch, seq_len, 2*hidden_units]
+            self.enc = tf.concat([tf.stack(hp.seq_length * [self.enc_user], axis=1), self.enc_item], axis=2) # 将user与item的embedding concat起来
 
-            ## Dropout
+            # Dropout
+            # enc: [batch, seq_len, 2*hidden_units]
             self.enc = tf.layers.dropout(self.enc,
                                         rate=hp.dropout_rate,
                                         training=tf.convert_to_tensor(is_training))
 
-            if hp.use_mha:
+            if hp.use_multihead_attention:
                 ## Blocks
                 for i in range(hp.num_blocks):
                     with tf.variable_scope("num_blocks_{}".format(i)):
                         ### Multihead Attention
-                        self.enc = multihead_attention(queries=self.enc,
+                        # enc: [batch, seq_len, 2*hidden_units]
+                        #   => [batch, seq_len, 2*hidden_units]
+                        self.enc = multihead_attention( queries=self.enc,
                                                         keys=self.enc,
+                                                        values=self.enc,
                                                         num_units=hp.hidden_units*2,
                                                         num_heads=hp.num_heads,
                                                         dropout_rate=hp.dropout_rate,
@@ -72,10 +83,12 @@ class Generator():
                                                         causality=False)
 
                         ### Feed Forward
+                        # enc: [batch, seq_len, 2*hidden_units]
                         self.enc = feedforward(self.enc, num_units=[4*hp.hidden_units, hp.hidden_units*2])
             else:
                 cell = tf.nn.rnn_cell.GRUCell(num_units=hp.hidden_units * 2)
                 outputs, _ = tf.nn.dynamic_rnn(cell=cell, inputs=self.enc, dtype=tf.float32)
+                # enc: [batch, seq_len, 2*hidden_units]
                 self.enc = outputs
 
         # Decoder
@@ -85,23 +98,33 @@ class Generator():
             if hp.num_layers > 1:
                 cells = [dec_cell] * hp.num_layers
                 dec_cell = MultiRNNCell(cells)
-            # ptr sampling
+            # pointer-network sampling
+            # enc_init_sate: [batch_size, state_size]
             enc_init_state = trainable_initial_state(hp.batch_size, dec_cell.state_size)
-            sampled_logits, sampled_path, _ = ptn_rnn_decoder(
-                dec_cell, None,
-                self.enc, enc_init_state,
-                hp.seq_length, hp.res_length, hp.hidden_units*2,
-                hp.num_glimpse, hp.batch_size,
-                mode="SAMPLE", reuse=False, beam_size=None)
+            # enc: [batch, seq_len, 2*hidden_units]
+            # sampled_logits: [batch_size, res_length, seq_length]
+            # sampled_path: [batch_size, res_length]
+            sampled_logits, sampled_path, _ = pointer_network_rnn_decoder(
+                cell=dec_cell,
+                decoder_target_ids=None,
+                enc_outputs=self.enc,
+                enc_final_states=enc_init_state,
+                seq_length=hp.seq_length,
+                res_length=hp.res_length,
+                hidden_dim=hp.hidden_units*2,
+                num_glimpse=hp.num_glimpse,
+                batch_size=hp.batch_size,
+                mode="SAMPLE",
+                reuse=False,
+                beam_size=None)
             # logits: [batch_size, res_length, seq_length]
             self.sampled_logits = tf.identity(sampled_logits, name="sampled_logits")
             # sample_path: [batch_size, res_length]
             self.sampled_path = tf.identity(sampled_path, name="sampled_path")
             self.sampled_result = batch_gather(self.item_cand, self.sampled_path)
 
-
             # self.decode_target_ids is placeholder
-            decoder_logits, _ = ptn_rnn_decoder(
+            decoder_logits, _ = pointer_network_rnn_decoder(
                 dec_cell, self.decode_target_ids,
                 self.enc, enc_init_state,
                 hp.seq_length, hp.res_length, hp.hidden_units*2,
@@ -109,7 +132,7 @@ class Generator():
                 mode="TRAIN", reuse=True, beam_size=None)
             self.dec_logits = tf.identity(decoder_logits, name="dec_logits")
 
-            supervised_logits, _ = ptn_rnn_decoder(
+            supervised_logits, _ = pointer_network_rnn_decoder(
                 dec_cell, self.card_idx,
                 self.enc, enc_init_state,
                 hp.seq_length, hp.res_length, hp.hidden_units*2,
@@ -117,7 +140,7 @@ class Generator():
                 mode="TRAIN", reuse=True, beam_size=None)
             self.supervised_logits = tf.identity(supervised_logits, name="supervised_logits")
 
-            _, infer_path, _ = ptn_rnn_decoder(
+            _, infer_path, _ = pointer_network_rnn_decoder(
                 dec_cell, None,
                 self.enc, enc_init_state,
                 hp.seq_length, hp.res_length, hp.hidden_units*2,

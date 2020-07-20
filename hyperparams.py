@@ -42,11 +42,11 @@ class Hyperparams:
     dis_hidden_size = 128 # for discriminator
     num_blocks = 2 # number of encoder/decoder blocks
     num_heads = 2
-    dropout_rate = 0.1
+    dropout_rate = 0.1 # 这里是0.1
 
     supervised_coe = 1.0
     schedule_sampling = True
-    use_mha = False
+    use_multihead_attention = False
     use_dis_reward = True
 
     # log print
