@@ -1,6 +1,4 @@
 # encoding: UTF-8
-
-
 import tensorflow as tf
 from tensorflow.python.ops import tensor_array_ops, control_flow_ops
 from tensorflow.contrib import rnn
@@ -30,6 +28,171 @@ except:
     # dynamic_rnn_decoder = tf.contrib.seq2seq.dynamic_rnn_decoder
     # simple_decoder_fn_train = tf.contrib.seq2seq.simple_decoder_fn_train
 
+def intra_attention(bef, query, batch_size, hidden_dim, scope="intra_attention"):
+    """
+     :param bef: decoder阶段的已输出序列[batch, decoder_len, hidden_dim] decoder_len为目前decoder的长度
+     :param query: decoder的输出, [batch, hidden_dim]
+     :return: intra_attention:[batch,hidden_dim]
+     """
+    with tf.variable_scope(scope) as scope:
+        W_b = tf.get_variable(
+            "W_b", [hidden_dim, hidden_dim],
+            initializer=tf.contrib.layers.xavier_initializer())
+        v_dec = tf.get_variable(
+            "v_dec", [hidden_dim],
+            initializer=tf.contrib.layers.xavier_initializer())
+        W_bef = tf.get_variable(
+            "W_bef", [1, hidden_dim, hidden_dim],
+            initializer=tf.contrib.layers.xavier_initializer())
+        bias_dec = tf.get_variable(
+            "bias_dec", [hidden_dim],
+            initializer=tf.zeros_initializer)
+
+        if len(bef) <= 1:
+            if len(bef) == 0:
+                return tf.zeros([batch_size, hidden_dim])
+            else:
+                return bef[0]
+        else:
+            bef = tf.stack(bef, axis=1)
+            # bef_rs = tf.reduce_sum(bef_s,axis=[2])
+
+        """用一维卷积来计算全连接"""
+        # bef: [batch, decoder_len, hidden_dim]
+        # W_bef: filter_kernel:[in_width=1, in_channel=hidden_dim, output_channel=hidden_dim]
+        # decoded_bef:[batch, decoder_len, hidden_dim]
+        decoded_bef = tf.nn.conv1d(bef, W_bef, stride=1, padding="VALID",
+                                   name="decoded_bef")  # [batch, decoder_len, hidden_dim]
+        # query:[batch, hidden_dim]
+        # W_b:[hidden_dim, hidden_dim]
+        # decoded_query:[batch, 1, hidden_dim]
+        decoded_query = tf.expand_dims(tf.matmul(query, W_b, name="decoded_query"), 1)  # [batch, 1, hidden_dim]
+        # decoded_bef:[batch, decoder_len, hidden_dim]
+        # decoded_query:[batch, 1, hidden_dim]
+        # bias_dec:[hidden_dim]
+        # v_dec:[hidden_dim]
+        # scores:[batch, decoder_len]
+        scores = tf.reduce_sum(v_dec * tf.tanh(decoded_bef + decoded_query + bias_dec), axis=[-1])  # [batch, decoder_len]
+        # scores:[batch, decoder_len]
+        # p1:[batch, decoder_len]
+        p1 = tf.nn.softmax(scores, axis=-1)
+        # aligments1:[batch, decoder_len, 1]
+        aligments1 = tf.expand_dims(p1, axis=2)
+        # bef: [batch, decoder_len, hidden_dim]
+        # return:[batch, hidden_dim], 序列内部各时间步attention加权平均
+        return tf.reduce_sum(aligments1 * bef, axis=[1])
+# end of intra_attention
+
+def attention(enc_ref, query, dec_ref, hidden_dim, enc_refs_dict, with_softmax, scope="attention"):
+    """
+     :param enc_ref: [batch, seq_length, hidden_dim]  encoder阶段的序列
+     :param query: [batch, hidden_dim] 上一个时间步decoder的输出
+     :param dec_ref: [batch,hidden_dim] decoder阶段的intra-decoder-attention的结果
+     :return attention score: [batch, seq_length]
+     """
+    with tf.variable_scope(scope) as scope:
+        W_q = tf.get_variable(
+            "W_q", [hidden_dim, hidden_dim],
+            initializer=tf.contrib.layers.xavier_initializer())
+        W_dec = tf.get_variable(
+            "W_dec", [hidden_dim, hidden_dim],
+            initializer=tf.contrib.layers.xavier_initializer())
+        v = tf.get_variable(
+            "v", [hidden_dim],
+            initializer=tf.contrib.layers.xavier_initializer())
+        bias = tf.get_variable(
+            "bias", [hidden_dim],
+            initializer=tf.zeros_initializer)
+
+        enc_ref_key = (enc_ref.name, scope.name)
+        if enc_ref_key not in enc_refs_dict:
+            W_ref = tf.get_variable("W_ref", [1, hidden_dim, hidden_dim],
+                                    initializer=tf.contrib.layers.xavier_initializer())
+            # enc_ref: [batch, seq_length, hidden_dim]
+            # W_ref:[1, hidden_dim, hidden_dim]
+            # enc_refs[enc_ref_key]:[batch, seq_length, hidden_dim]
+            enc_refs_dict[enc_ref_key] = tf.nn.conv1d(enc_ref, W_ref, 1, "VALID",
+                                                      name="encoded_ref")  # [batch, data_len, hidden_dim]
+        # encoded_ref:[batch, seq_length, hidden_dim]
+        encoded_ref = enc_refs_dict[enc_ref_key]
+        # query: [batch, hidden_dim]
+        # W_q: [hidden_dim, hidden_dim]
+        # encoded_query:[batch,1, hidden_dim]
+        encoded_query = tf.expand_dims(tf.matmul(query, W_q, name="encoded_query"), axis=1)  # [batch, 1, hidden_dim], 乘以W_q是为了转换到attention空间
+        # dec_ref:[batch, hidden_dim]
+        # W_dec:[hidden_dim, hidden_dim]
+        # decoded_ref:[batch, 1, hidden_dim]
+        decoded_ref = tf.expand_dims(tf.matmul(dec_ref, W_dec, name="decoded_ref"), axis=1)  # [batch, 1, hidden_dim]
+        # v:[hidden_dim]
+        # encoded_ref:[batch, seq_length, hidden_dim]
+        # encoded_query:[batch, 1, hidden_dim]
+        # decoded_ref:[batch, hidden_dim]
+        # bias:[hidden_dim]
+        # scores:[batch, seq_length]
+        scores = tf.reduce_sum(v * tf.tanh(encoded_ref + encoded_query + decoded_ref + bias), axis=[-1])  # [batch, data_len]
+
+        if with_softmax:
+            return tf.nn.softmax(scores, axis=-1)
+        else:
+            return scores
+# end of attention
+
+def glimpse(enc_ref, query, dec_ref, hidden_dim, enc_refs_dict, scope="glimpse"):
+    """
+    :param enc_ref: [batch, seq_length, hidden_dim]
+    :param query: [batch, hidden_dim]
+    :param dec_ref: [batch, hidden_dim] decoder阶段的intra-decoder-attention的结果
+    :return g: [batch, hidden_dim]
+    """
+    # p: [batch, seq_length]
+    p = attention(enc_ref, query, dec_ref, hidden_dim, enc_refs_dict, with_softmax=True, scope=scope)
+    # p_alignments: [batch, seq_length, 1]
+    p_alignments = tf.expand_dims(p, axis=2)
+    # p_alignments: [batch, seq_length, 1]
+    # enc_ref:        [batch, seq_length, hidden_dim]
+    # return:     [batch, hidden_dim]
+    return tf.reduce_sum(p_alignments * enc_ref, axis=[1])
+
+def output_fn(enc_ref, query, dec_ref, hidden_dim, enc_refs_dict, num_glimpse):
+    """
+    :param enc_ref: [batch, seq_length, hidden_dim]
+    :param query: [batch, hidden_dim]
+    :param dec_ref: [batch, hidden_dim] decoder阶段的intra-decoder-attention的结果
+    :param num_glimpse: 1
+    :return: [batch_size, seq_length]
+    """
+    # 先用query与enc_ref交互多次
+    for idx in range(num_glimpse):
+        # query: [batch, hidden_dim]
+        query = glimpse(enc_ref, query, dec_ref, hidden_dim, enc_refs_dict, "glimpse_{}".format(idx))
+    # return: [batch, seq_length]
+    return attention(enc_ref, query, dec_ref, hidden_dim, enc_refs_dict, with_softmax=False, scope="attention")
+
+def input_fn(input_idx, index_matrix_to_pairs, enc_outputs):
+    """
+    turn input_idx to encoder_output vector
+    :param input_idx: [batch_size] or [batch_size, seq_length], 上一个timestep中decoder的输出的vocab index(即pointer-network)
+    :return: [batch_size, hidden_dim] or [batch_size, seq_length, hidden_dim]
+    """
+
+    # enc_outputs: [batch_size, seq_length, hidden_dim]
+    # input_index_pairs: [batch_size, 2], 2代表(sample_index, seq_index)
+    # input_index_pairs = tf.stop_gradient(tf.stack(
+    #     [tf.range(tf.shape(input_idx)[0], dtype=tf.int32), input_idx], axis=1))
+    input_index_pairs = tf.stop_gradient(index_matrix_to_pairs(input_idx))
+    return tf.gather_nd(enc_outputs, input_index_pairs)
+
+def random_sample_from_logits(logits, batch_size): # 多项式分布中采样一个
+    # logits:[batch, num_classes=]
+    # sampled_idx:[batch, num_samples=1]
+    sampled_idx = tf.cast(tf.multinomial(logits=logits, num_samples=1), dtype='int32')  # [batch_size,1]
+    sampled_idx = tf.reshape(sampled_idx, [batch_size])  # [batch_size]
+    return sampled_idx
+
+def greedy_sample_from_logits(logits, batch_size):
+    # logits: [batch, seq_length]
+    # return: [batch]
+    return tf.cast(tf.argmax(logits, 1), tf.int32)
 """
 pointer-network decoder
 """
@@ -69,212 +232,74 @@ def pointer_network_rnn_decoder(cell,
         first_decoder_input = trainable_initial_state(batch_size, hidden_dim, initializer=None, name="first_decoder_input")
 
         # 多次decode计算attention时，计算encoder参数只计算一次
-        enc_refs = {}
+        enc_refs_dict = {}
         dec_qs = {}
         # 存储已经decoder的序列,用于计算intra-attention
         output_ref = []
         # index_matrix_to_pairs: [batch_size, seq_length, 2], 最后的一维里的元素是: (sample_index, seq_index)
         index_matrix_to_pairs = index_matrix_to_pairs_fn(batch_size, seq_length)
 
-        def intra_attention(bef, query, scope="intra_attention"):
-            """
-             :param bef: decoder阶段的已输出序列[batch, decoder_len, hidden_dim] decoder_len为目前decoder的长度
-             :param query: decoder的输出, [batch, hidden_dim]
-             :return: intra_attention:[batch,hidden_dim]
-             """
-            with tf.variable_scope(scope) as scope:
-                W_b = tf.get_variable(
-                    "W_b", [hidden_dim, hidden_dim],
-                    initializer=tf.contrib.layers.xavier_initializer())
-                v_dec = tf.get_variable(
-                    "v_dec", [hidden_dim],
-                    initializer=tf.contrib.layers.xavier_initializer())
-                W_bef = tf.get_variable(
-                    "W_bef", [1, hidden_dim, hidden_dim],
-                    initializer=tf.contrib.layers.xavier_initializer())
-                bias_dec = tf.get_variable(
-                    "bias_dec", [hidden_dim],
-                    initializer=tf.zeros_initializer)
-
-                if len(bef) <= 1:
-                    if len(bef) == 0:
-                        return tf.zeros([batch_size, hidden_dim])
-                    else:
-                        return bef[0]
-                else:
-                    bef = tf.stack(bef, axis=1)
-                    # bef_rs = tf.reduce_sum(bef_s,axis=[2])
-
-                """用一维卷积来计算全连接"""
-                # bef: [batch, decoder_len, hidden_dim]
-                # W_bef: filter_kernel:[in_width=1, in_channel=hidden_dim, output_channel=hidden_dim]
-                # decoded_bef:[batch, decoder_len, hidden_dim]
-                decoded_bef = tf.nn.conv1d(bef, W_bef, stride=1, padding="VALID",
-                                           name="decoded_bef")  # [batch, decoder_len, hidden_dim]
-                # query:[batch, hidden_dim]
-                # W_b:[hidden_dim, hidden_dim]
-                # decoded_query:[batch, 1, hidden_dim]
-                decoded_query = tf.expand_dims(tf.matmul(query, W_b, name="decoded_query"), 1)  # [batch, 1, hidden_dim]
-                # decoded_bef:[batch, decoder_len, hidden_dim]
-                # decoded_query:[batch, 1, hidden_dim]
-                # bias_dec:[hidden_dim]
-                # v_dec:[hidden_dim]
-                # scores:[batch, decoder_len]
-                scores = tf.reduce_sum(v_dec * tf.tanh(decoded_bef + decoded_query + bias_dec), axis=[-1])  # [batch, decoder_len]
-                # scores:[batch, decoder_len]
-                # p1:[batch, decoder_len]
-                p1 = tf.nn.softmax(scores, axis=-1)
-                # aligments1:[batch, decoder_len, 1]
-                aligments1 = tf.expand_dims(p1, axis=2)
-                # bef: [batch, decoder_len, hidden_dim]
-                # return:[batch, hidden_dim], 序列内部各时间步attention加权平均
-                return tf.reduce_sum(aligments1 * bef, axis=[1])
-
-        def attention(enc_ref, query, dec_ref, with_softmax, scope="attention"):
-            """
-             :param enc_ref: [batch, seq_length, hidden_dim]  encoder阶段的序列
-             :param query: [batch, hidden_dim] 上一个时间步decoder的输出
-             :param dec_ref: [batch,hidden_dim] decoder阶段的intra-decoder-attention的结果
-             :return attention score: [batch, seq_length]
-             """
-            with tf.variable_scope(scope) as scope:
-                W_q = tf.get_variable(
-                    "W_q", [hidden_dim, hidden_dim],
-                    initializer=tf.contrib.layers.xavier_initializer())
-                W_dec = tf.get_variable(
-                    "W_dec", [hidden_dim, hidden_dim],
-                    initializer=tf.contrib.layers.xavier_initializer())
-                v = tf.get_variable(
-                    "v", [hidden_dim],
-                    initializer=tf.contrib.layers.xavier_initializer())
-                bias = tf.get_variable(
-                    "bias", [hidden_dim],
-                    initializer=tf.zeros_initializer)
-
-                enc_ref_key = (enc_ref.name, scope.name)
-                if enc_ref_key not in enc_refs:
-                    W_ref = tf.get_variable("W_ref", [1, hidden_dim, hidden_dim],
-                                            initializer=tf.contrib.layers.xavier_initializer())
-                    # enc_ref: [batch, seq_length, hidden_dim]
-                    # W_ref:[1, hidden_dim, hidden_dim]
-                    # enc_refs[enc_ref_key]:[batch, seq_length, hidden_dim]
-                    enc_refs[enc_ref_key] = tf.nn.conv1d(enc_ref, W_ref, 1, "VALID",
-                                                         name="encoded_ref")  # [batch, data_len, hidden_dim]
-                # encoded_ref:[batch, seq_length, hidden_dim]
-                encoded_ref = enc_refs[enc_ref_key]
-                # query: [batch, hidden_dim]
-                # W_q: [hidden_dim, hidden_dim]
-                # encoded_query:[batch,1, hidden_dim]
-                encoded_query = tf.expand_dims(tf.matmul(query, W_q, name="encoded_query"), axis=1)  # [batch, 1, hidden_dim], 乘以W_q是为了转换到attention空间
-                # dec_ref:[batch, hidden_dim]
-                # W_dec:[hidden_dim, hidden_dim]
-                # decoded_ref:[batch, 1, hidden_dim]
-                decoded_ref = tf.expand_dims(tf.matmul(dec_ref, W_dec, name="decoded_ref"), axis=1)  # [batch, 1, hidden_dim]
-                # v:[hidden_dim]
-                # encoded_ref:[batch, seq_length, hidden_dim]
-                # encoded_query:[batch, 1, hidden_dim]
-                # decoded_ref:[batch, hidden_dim]
-                # bias:[hidden_dim]
-                # scores:[batch, seq_length]
-                scores = tf.reduce_sum(v * tf.tanh(encoded_ref + encoded_query + decoded_ref + bias), axis=[-1])  # [batch, data_len]
-
-                if with_softmax:
-                    return tf.nn.softmax(scores, axis=-1)
-                else:
-                    return scores
-
-        def glimpse(ref, query, dec_ref, scope="glimpse"):
-            """
-            :param ref: [batch, seq_length, hidden_dim]
-            :param query: [batch, hidden_dim]
-            :param dec_ref: [batch, hidden_dim] decoder阶段的intra-decoder-attention的结果
-            :return g: [batch, hidden_dim]
-            """
-            # p: [batch, seq_length]
-            p = attention(ref, query, dec_ref, with_softmax=True, scope=scope)
-            # alignments: [batch, seq_length, 1]
-            alignments = tf.expand_dims(p, axis=2)
-            # alignments: [batch, seq_length, 1]
-            # enc_ref:        [batch, seq_length, hidden_dim]
-            # return:     [batch, hidden_dim]
-            return tf.reduce_sum(alignments * ref, axis=[1])
-
-        def output_fn(ref, query, dec_ref, num_glimpse):
-            """
-            :param ref: [batch, seq_length, hidden_dim]
-            :param query: [batch, hidden_dim]
-            :param dec_ref: [batch, hidden_dim] decoder阶段的intra-decoder-attention的结果
-            :param num_glimpse: 1
-            :return: [batch_size, seq_length]
-            """
-
-            for idx in range(num_glimpse):
-                # query: [batch, hidden_dim]
-                query = glimpse(ref, query, dec_ref, "glimpse_{}".format(idx))
-            # return: [batch, seq_length]
-            return attention(ref, query, dec_ref, with_softmax=False, scope="attention")
-
-        def input_fn(input_idx):
-            """
-            turn input_idx to encoder_output vector
-            :param input_idx: [batch_size] or [batch_size, seq_length]
-            :return: [batch_size, hidden_dim] or [batch_size, seq_length, hidden_dim]
-            """
-
-            # enc_outputs: [batch_size, seq_length, hidden_dim]
-            # input_index_pairs: [batch_size, 2], 2代表(sample_index, seq_index)
-            # input_index_pairs = tf.stop_gradient(tf.stack(
-            #     [tf.range(tf.shape(input_idx)[0], dtype=tf.int32), input_idx], axis=1))
-            input_index_pairs = tf.stop_gradient(index_matrix_to_pairs(input_idx))
-            return tf.gather_nd(enc_outputs, input_index_pairs)
-
-        def random_sample_from_logits(logits):
-            # logits:[batch, num_classes=]
-            # sampled_idx:[batch, num_samples=1]
-            sampled_idx = tf.cast(tf.multinomial(logits=logits, num_samples=1), dtype='int32')  # [batch_size,1]
-            sampled_idx = tf.reshape(sampled_idx, [batch_size])  # [batch_size]
-            return sampled_idx
-
-        def greedy_sample_from_logits(logits):
-            # logits: [batch, seq_length]
-            return tf.cast(tf.argmax(logits, 1), tf.int32)
-
         def call_cell(input_idx, state, point_mask):
             """
-              call lstm_cell and compute attention and intra-attention
+            call lstm_cell and compute attention and intra-attention
             :param input_idx: [batch]
-            :param state:
+            :param state: [batch_size, state_size]
             :param point_mask: [batch, seq_length]
-            :return: [batch_size, seq_length]
+            :return: [batch_size, seq_length = enc_outputs.enc]
             """
-            if input_idx is not None:
-                _input = input_fn(input_idx)  # [batch_size, hidden_dim]
-            else:
+            if input_idx is not None: # 不是第一次,用上一次的decoder输出作为input
+                _input = input_fn(input_idx, index_matrix_to_pairs, enc_outputs)  # [batch_size, hidden_dim]
+            else: # None, 第一次,用全0作为decoder input, 0代表EOS/SOS
                 _input = first_decoder_input
 
+            """
+            在lstm cell中, lstm经过一个时间步后的output: [batch, hidden], 由于并没有多个timestep,所以不需要dynamic_rnn
+            dec_cell = MultiRNNCell(cells)
+            output_i:[batch, hidden_dim], dec_state: {c: [batch_size, hidden_size], h: [batch_size, hidden_size]}
+            output_i, dec_state = dec_cell(inputs=cell_input, state=dec_state)
+            """
+            # 计算一次lstm的timestep
+            # cell_output: [batch_size, hidden_dim]
+            # state: {c: [batch_size, hidden_dim], h: [batch_size, hidden_dim]}
+            # new_state: {c: [batch_size, hidden_dim], h: [batch_size, hidden_dim]}
             cell_output, new_state = cell(_input, state)
+
             # 先计算 intra-decoder-attention
-            intra_dec = intra_attention(output_ref, cell_output)  # [batch_size, hidden_dim]
+            # output_ref: [batch, decoder_len, hidden_dim
+            # cell_output: [batch_size, hidden_dim]
+            # intra_dec: [batch_size, hidden_dim]
+            intra_dec = intra_attention(output_ref, cell_output, batch_size, hidden_dim)  # [batch_size, hidden_dim]
+            # output_ref:[decode_seq_length, batch_size, hidden_dim]
             output_ref.append(cell_output)
-            logits = output_fn(enc_outputs, cell_output, intra_dec, num_glimpse)  # [batch_size, data_len]
+            # enc_outputs: [batch, seq_len, 2 * hidden_units]
+            # cell_output: [batch_size, hidden_dim]
+            # intra_dec: [batch_size, hidden_dim]
+            # logits: [batch_size, seq_len = enc_outputs.seq_len]
+            logits = output_fn(enc_outputs, cell_output, intra_dec, hidden_dim, enc_refs_dict, num_glimpse)
+
             if point_mask is not None:
-                max_logit = tf.reduce_max(logits)
-                min_logit = tf.reduce_min(logits)
-                # 确保先前选过的点不再选，设置logit为min_logit-9999，并阻止梯度回传。
-                logits = tf.minimum(logits,
-                                    tf.stop_gradient(max_logit + 1 + tf.cast(point_mask, dtype=tf.float32) * (
-                                    min_logit - 10000 - max_logit)))
+                max_logit = tf.reduce_max(logits, axis=None) # scalar, 在所有维上进行max
+                min_logit = tf.reduce_min(logits, axis=None)
+                # 确保先前选过的点不再选，设置logit为min_logit - 9999，并阻止梯度回传。point_mask点为1的代表点不可用, 0代表点可用
+                # 1.点不可用, masked_logits: min_logit - 9999
+                # 2.点可用,   masked_logits: max_logit + 1
+                # masked_logits: [batch, seq_length]
+                masked_logits = max_logit + 1 + tf.cast(point_mask, dtype=tf.float32) * (min_logit - 10000 - max_logit)
+                # logits: [batch, seq_length]
+                logits = tf.minimum(logits, tf.stop_gradient(masked_logits)) # mask不需要回传梯度
+            # logits: [batch, seq_length]
+            # new_state: {c: [batch_size, hidden_dim], h: [batch_size, hidden_dim]}
             return logits, new_state
 
-        def update_mask(output_idx, old_mask):
-            new_mask_inc = tf.one_hot(output_idx, depth=seq_length, dtype='int32')
-            new_mask = tf.stop_gradient(old_mask + new_mask_inc)
-            return new_mask
+        # enc_final_states: [batch_size, state_size], encoder的最后一个timestep的state
+        # logits: [batch_size, seq_len=enc_outputs.seq_len]
+        # states: [batch_size, state_size]
+        logits, state = call_cell(input_idx=None, state=enc_final_states, point_mask=None)
 
-        # logits: [batch_size, data_len]
-        logits, state = call_cell(input_idx=None, state=enc_final_states, point_mask=None)  # [batch_size, data_len]
         scope.reuse_variables()
+        # logits: [batch_size, seq_len=enc_outputs.seq_len]
         output_logits = [logits]
+        # point_mask:[batch_size, seq_length]
         point_mask = tf.zeros([batch_size, seq_length], dtype=tf.int32)
 
         if (mode in ['SAMPLE', "GREEDY"]):
@@ -284,27 +309,32 @@ def pointer_network_rnn_decoder(cell,
                 sample_fn = greedy_sample_from_logits
             else:
                 raise NotImplementedError("invalid mode: %s. Available modes: [SAMPLE, GREEDY]" % mode)
-            output_idx = sample_fn(logits)  # [batch_size]
+
+            # logits: [batch_size, seq_len=enc_outputs.seq_len]
+            # output_idx:[batch_size]
+            output_idx = sample_fn(logits, batch_size)  # [batch_size]
             output_idxs = [output_idx]
-            point_mask = update_mask(output_idx, point_mask)
+            # output_idx:[batch_size]
+            # point_mask:[batch_size, seq_length]
+            point_mask = update_mask(output_idx, point_mask, seq_length)
 
             for i in range(1, res_length):
                 logits, state = call_cell(output_idx, state, point_mask)  # [batch_size, data_len]
                 output_logits.append(logits)
                 output_idx = sample_fn(logits)  # [batch_size]
-                point_mask = update_mask(output_idx, point_mask)
+                point_mask = update_mask(output_idx, point_mask, seq_length)
                 output_idxs.append(output_idx)
             return tf.stack(output_logits, axis=1), tf.stack(output_idxs, axis=1), state
         elif mode == "TRAIN":
             output_idxs = tf.unstack(decoder_target_ids, axis=1)
             output_idx = output_idxs[0]  # [batch_size]
-            point_mask = update_mask(output_idx, point_mask)
+            point_mask = update_mask(output_idx, point_mask, seq_length)
 
             for i in range(1, res_length):
                 logits, state = call_cell(output_idx, state, point_mask)  # [batch_size, data_len]
                 output_logits.append(logits)
                 output_idx = output_idxs[i]  # [batch_size]
-                point_mask = update_mask(output_idx, point_mask)
+                point_mask = update_mask(output_idx, point_mask, seq_length)
             return tf.stack(output_logits, axis=1), state
         elif mode == "BEAMSEARCH":
             index_matrix_to_beampairs = index_matrix_to_pairs_fn(batch_size, beam_size)
@@ -363,8 +393,8 @@ def pointer_network_rnn_decoder(cell,
                 state = beam_select(state, last_beam_id)
                 point_mask = beam_select(point_mask, last_beam_id)
                 output_idx = tf.unstack(output_idx, axis=1)  # [batch] * beam_size
-                #point_mask = [update_mask(output_idx[i], point_mask[i]) for i in range(beam_size)]
-                point_mask = [update_mask(output_idx[i], point_mask[i]) for i in xrange(beam_size)]
+                #point_mask = [update_mask(output_idx[i], point_mask[i], seq_length) for i in range(beam_size)]
+                point_mask = [update_mask(output_idx[i], point_mask[i], seq_length) for i in xrange(beam_size)]
 
                 l_output_idx = [tf.expand_dims(t, axis=1)  # [batch, 1] * beam_size
                                 for t in output_idx]
@@ -395,6 +425,8 @@ def pointer_network_rnn_decoder(cell,
             return accum_logits[0], output_idxs[0], state[0]
         else:
             raise NotImplementedError("unknown mode: %s. Available modes: [SAMPLE, TRAIN, GREEDY, BEAMSEARCH]" % mode)
+# end of pointer_network_rnn_decoder
+
 
 # 返回一个tensor, 如Tensor("my_init_state_0_tiled:0", shape=(3, 2), dtype=float32)
 def trainable_initial_state(batch_size,
@@ -425,6 +457,11 @@ def trainable_initial_state(batch_size,
     return nest.pack_sequence_as(structure=state_size,
                                  flat_sequence=tiled_states)
 
+def update_mask(output_idx, old_mask, seq_length):
+    # output_idx:[[batch_size]]
+    new_mask_inc = tf.one_hot(output_idx, depth=seq_length, dtype='int32')
+    new_mask = tf.stop_gradient(old_mask + new_mask_inc)
+    return new_mask
 
 
 def ctr_dicriminator(user, card, hidden_dim):
