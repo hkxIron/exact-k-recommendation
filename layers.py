@@ -130,10 +130,10 @@ def pointer_network_rnn_decoder(cell,
                 # return:[batch, hidden_dim], 序列内部各时间步attention加权平均
                 return tf.reduce_sum(aligments1 * bef, axis=[1])
 
-        def attention(ref, query, dec_ref, with_softmax, scope="attention"):
+        def attention(enc_ref, query, dec_ref, with_softmax, scope="attention"):
             """
-             :param ref: [batch, seq_length, hidden_dim]  encoder阶段的序列
-             :param query: [batch, hidden_dim] decoder的输出
+             :param enc_ref: [batch, seq_length, hidden_dim]  encoder阶段的序列
+             :param query: [batch, hidden_dim] 上一个时间步decoder的输出
              :param dec_ref: [batch,hidden_dim] decoder阶段的intra-decoder-attention的结果
              :return attention score: [batch, seq_length]
              """
@@ -151,14 +151,14 @@ def pointer_network_rnn_decoder(cell,
                     "bias", [hidden_dim],
                     initializer=tf.zeros_initializer)
 
-                enc_ref_key = (ref.name, scope.name)
+                enc_ref_key = (enc_ref.name, scope.name)
                 if enc_ref_key not in enc_refs:
                     W_ref = tf.get_variable("W_ref", [1, hidden_dim, hidden_dim],
                                             initializer=tf.contrib.layers.xavier_initializer())
-                    # ref: [batch, seq_length, hidden_dim]
+                    # enc_ref: [batch, seq_length, hidden_dim]
                     # W_ref:[1, hidden_dim, hidden_dim]
                     # enc_refs[enc_ref_key]:[batch, seq_length, hidden_dim]
-                    enc_refs[enc_ref_key] = tf.nn.conv1d(ref, W_ref, 1, "VALID",
+                    enc_refs[enc_ref_key] = tf.nn.conv1d(enc_ref, W_ref, 1, "VALID",
                                                          name="encoded_ref")  # [batch, data_len, hidden_dim]
                 # encoded_ref:[batch, seq_length, hidden_dim]
                 encoded_ref = enc_refs[enc_ref_key]
@@ -195,7 +195,7 @@ def pointer_network_rnn_decoder(cell,
             # alignments: [batch, seq_length, 1]
             alignments = tf.expand_dims(p, axis=2)
             # alignments: [batch, seq_length, 1]
-            # ref:        [batch, seq_length, hidden_dim]
+            # enc_ref:        [batch, seq_length, hidden_dim]
             # return:     [batch, hidden_dim]
             return tf.reduce_sum(alignments * ref, axis=[1])
 
@@ -203,7 +203,7 @@ def pointer_network_rnn_decoder(cell,
             """
             :param ref: [batch, seq_length, hidden_dim]
             :param query: [batch, hidden_dim]
-            :param dec_ref: [batch,hidden_dim] decoder阶段的intra-decoder-attention的结果
+            :param dec_ref: [batch, hidden_dim] decoder阶段的intra-decoder-attention的结果
             :param num_glimpse: 1
             :return: [batch_size, seq_length]
             """
@@ -222,13 +222,15 @@ def pointer_network_rnn_decoder(cell,
             """
 
             # enc_outputs: [batch_size, seq_length, hidden_dim]
-            # input_index_pairs: [batch_size, 2]
+            # input_index_pairs: [batch_size, 2], 2代表(sample_index, seq_index)
             # input_index_pairs = tf.stop_gradient(tf.stack(
             #     [tf.range(tf.shape(input_idx)[0], dtype=tf.int32), input_idx], axis=1))
             input_index_pairs = tf.stop_gradient(index_matrix_to_pairs(input_idx))
             return tf.gather_nd(enc_outputs, input_index_pairs)
 
         def random_sample_from_logits(logits):
+            # logits:[batch, num_classes=]
+            # sampled_idx:[batch, num_samples=1]
             sampled_idx = tf.cast(tf.multinomial(logits=logits, num_samples=1), dtype='int32')  # [batch_size,1]
             sampled_idx = tf.reshape(sampled_idx, [batch_size])  # [batch_size]
             return sampled_idx
