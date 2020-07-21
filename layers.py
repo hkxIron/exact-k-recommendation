@@ -28,6 +28,42 @@ except:
     # dynamic_rnn_decoder = tf.contrib.seq2seq.dynamic_rnn_decoder
     # simple_decoder_fn_train = tf.contrib.seq2seq.simple_decoder_fn_train
 
+# 返回一个tensor, 如Tensor("my_init_state_0_tiled:0", shape=(3, 2), dtype=float32)
+def trainable_initial_state(batch_size,
+                            state_size,
+                            initializer=None,
+                            name="initial_state"):
+    flat_state_size = nest.flatten(state_size)  # Returns a flat sequence from a given nested structure.
+
+    if not initializer:
+        flat_initializer = tuple(tf.zeros_initializer for _ in flat_state_size)
+    else:
+        flat_initializer = tuple(tf.zeros_initializer for initializer in flat_state_size)
+
+    names = ["{}_{}".format(name, i) for i in range(len(flat_state_size))]
+    tiled_states = []
+
+    # tiled_ta = tf.ones(shape=[batch_size])
+    for name, size, init in zip(names, flat_state_size, flat_initializer):
+        shape_with_batch_dim = [1, size]
+        initial_state_variable = tf.get_variable(
+            name, shape=shape_with_batch_dim, initializer=init())
+
+        # tf.multiply(tiled_ta, initial_state_variable, name=(name + "_tiled"))
+        tiled_state = tf.tile(initial_state_variable,
+                              [batch_size, 1], name=(name + "_tiled"))
+        tiled_states.append(tiled_state)
+
+    return nest.pack_sequence_as(structure=state_size,
+                                 flat_sequence=tiled_states)
+
+def update_mask(output_idx, old_mask, seq_length):
+    # output_idx:[[batch_size]]
+    new_mask_inc = tf.one_hot(output_idx, depth=seq_length, dtype='int32')
+    new_mask = tf.stop_gradient(old_mask + new_mask_inc)
+    # new_mask:[batch_size, seq_length]
+    return new_mask
+
 def intra_attention(bef, query, batch_size, hidden_dim, scope="intra_attention"):
     """
      :param bef: decoder阶段的已输出序列[batch, decoder_len, hidden_dim] decoder_len为目前decoder的长度
@@ -194,6 +230,79 @@ def greedy_sample_from_logits(logits, batch_size):
     # return: [batch]
     return tf.cast(tf.argmax(logits, 1), tf.int32)
 
+def top_k(acum_logits, logits, accum_logits, beam_size, seq_length, index_matrix_to_beam_pairs):
+    """
+    :param acum_logits: [batch] * beam_size
+    :param logits: [batch, len] * beam_size
+    :return:
+      new_acum_logits [batch] * beam_size,
+      last_beam_id [batch, beam_size], sample_id [batch, beam_size]
+    """
+    # local_acum_logits: [batch, len*beam_size]
+    candicate_size = len(logits)
+    local_acum_logits = logits
+    if accum_logits is not None:
+        local_acum_logits = [tf.reshape(acum_logits[ik], [-1, 1]) + logits[ik]
+                             for ik in range(candicate_size)]
+    # local_acum_logits: [batch, len]*candicate_size -> [batch, len*candicate_size]
+    local_acum_logits = tf.concat(local_acum_logits, axis=1)
+    # local_acum_logits:[batch, len * candicate_size] -> [batch, beam_size]
+    # local_id:[batch, beam_size] \in range(len*candicate_size)
+    local_acum_logits, local_id = tf.nn.top_k(local_acum_logits, beam_size)
+    last_beam_id = local_id // seq_length
+    last_beam_id = index_matrix_to_beam_pairs(last_beam_id)  # [batch, beam_size, 2]
+    sample_id = local_id % seq_length
+    new_acum_logits = tf.unstack(local_acum_logits, axis=1)  # [batch] * beam_size
+    return new_acum_logits, last_beam_id, sample_id
+
+def beam_select(inputs_l, beam_id):
+    """
+    :param input_l: list of tensors, len(input_l) = k
+    :param beam_id: [batch, k, 2]
+    :return: output_l, list of tensors, len = k
+    """
+
+    def _select(input_l):
+        input_l = tf.stack(input_l, axis=1)  # [batch, beam_size, ...]
+        output_l = tf.gather_nd(input_l, beam_id)  # [batch, beam_size, ...]
+        output_l = tf.unstack(output_l, axis=1)
+        return output_l
+
+    # [state, state] -> [(h,c),(h,c)] -> [[h,h,h], [c,c,c]]
+    inputs_ta_flat = zip(*[nest.flatten(input_l) for input_l in inputs_l])
+    # [[h,h,h], [c,c,c]] -(beam select)> [[h,h,h], [c,c,c]]
+    outputs_ta_flat = [_select(input_ta) for input_ta in inputs_ta_flat]
+    # [[h,h,h], [c,c,c]] -> [(h,c),(h,c)] -> [state, state]
+    outputs_l = [nest.pack_sequence_as(inputs_l[0], output_ta_flat)
+                 for output_ta_flat in zip(*outputs_ta_flat)]
+    return outputs_l
+
+def beam_sample(accum_logits, logits, point_mask, state, pre_output_idxs,
+                beam_size,
+                seq_length,
+                index_matrix_to_beam_pairs):
+    # sample top_k, last_bema_id:[batch,beam_size], output_idx:[batch,beam_size]
+    accum_logits, last_beam_id, output_idx = top_k(accum_logits,
+                                                   logits,
+                                                   accum_logits,
+                                                   beam_size,
+                                                   seq_length,
+                                                   index_matrix_to_beam_pairs)  # [batch, beam_size], 前面那个beam path, 后面哪个节点
+    state = beam_select(state, last_beam_id)
+    point_mask = beam_select(point_mask, last_beam_id)
+    output_idx = tf.unstack(output_idx, axis=1)  # [batch] * beam_size
+    #point_mask = [update_mask(output_idx[i], point_mask[i], seq_length) for i in range(beam_size)]
+    point_mask = [update_mask(output_idx[i], point_mask[i], seq_length) for i in xrange(beam_size)]
+
+    l_output_idx = [tf.expand_dims(t, axis=1)  # [batch, 1] * beam_size
+                    for t in output_idx]
+    if pre_output_idxs is not None:
+        pre_output_idxs = beam_select(pre_output_idxs, last_beam_id)
+        output_idxs = map(lambda ts: tf.concat(ts, axis=1), zip(pre_output_idxs, l_output_idx))
+    else:
+        output_idxs = l_output_idx
+    return accum_logits, point_mask, state, output_idx, output_idxs
+
 
 """
 pointer-network decoder
@@ -330,7 +439,7 @@ def pointer_network_rnn_decoder(cell,
                 # logits: [batch_size, seq_len=enc_outputs.seq_len]
                 logits, state = call_cell(output_idx, state, point_mask)  # [batch_size, data_len]
                 # output_logits: [timestep=res_length, batch_size, seq_len=enc_outputs.seq_len]
-                output_logits.append(logits)
+                output_logits.append(logits) # 每一个decoder output对enc_output的attention分数
                 # logits: [batch_size, seq_len=enc_outputs.seq_len]
                 # output_idx:[batch_size]
                 output_idx = sample_fn(logits, batch_size)  # [batch_size]
@@ -340,9 +449,9 @@ def pointer_network_rnn_decoder(cell,
                 # output_idx:[batch_size]
                 # output_idxs:[timestep=res_length,batch_size]
                 output_idxs.append(output_idx)
-            # output_logits: [batch_size, timestep=res_length, seq_len=enc_outputs.seq_len]
-            # output_idxs:   [batch_size, timestep=res_length]
-            # state: [batch_size, state_size]
+            # return output_logits: [batch_size, timestep=res_length, seq_len=enc_outputs.seq_len]
+            # return output_idxs:   [batch_size, timestep=res_length]
+            # return state: [batch_size, state_size]
             return tf.stack(output_logits, axis=1), tf.stack(output_idxs, axis=1), state
 
         elif mode == "TRAIN":
@@ -351,85 +460,30 @@ def pointer_network_rnn_decoder(cell,
             # output_idxs:[timestep=res_length,batch_size]
             # output_idx: [batch_size]
             output_idx = output_idxs[0]  # [batch_size]
+
             # output_idx: [batch_size]
             # point_mask: [batch_size, seq_length]
             point_mask = update_mask(output_idx, point_mask, seq_length)
 
             for i in range(1, res_length):
-                # ouput_idx: [batch_size]
+                # output_idx: [batch_size]
+                # state: [batch_size, state_size]
+                # point_mask: [batch_size, seq_length]
                 logits, state = call_cell(output_idx, state, point_mask)  # [batch_size, data_len]
+                # output_logits: [timestep=res_length, batch_size, seq_len=enc_outputs.seq_len]
                 output_logits.append(logits)
+                # output_idxs:[timestep=res_length,batch_size]
+                # output_idx: [batch_size]
                 output_idx = output_idxs[i]  # [batch_size]
+                # output_idx: [batch_size]
+                # point_mask: [batch_size, seq_length]
                 point_mask = update_mask(output_idx, point_mask, seq_length)
+            # return output_logits: [batch_size, timestep=res_length, seq_len=enc_outputs.seq_len]
+            # state: [batch_size, state_size]
             return tf.stack(output_logits, axis=1), state
+
         elif mode == "BEAMSEARCH":
-            index_matrix_to_beampairs = index_matrix_to_pairs_fn(batch_size, beam_size)
-
-            def top_k(acum_logits, logits):
-                """
-                :param acum_logits: [batch] * beam_size
-                :param logits: [batch, len] * beam_size
-                :return:
-                  new_acum_logits [batch] * beam_size,
-                  last_beam_id [batch, beam_size], sample_id [batch, beam_size]
-                """
-                # local_acum_logits: [batch, len*beam_size]
-                candicate_size = len(logits)
-                local_acum_logits = logits
-                if accum_logits is not None:
-                    local_acum_logits = [tf.reshape(acum_logits[ik], [-1, 1]) + logits[ik]
-                                         for ik in range(candicate_size)]
-                # local_acum_logits: [batch, len]*candicate_size -> [batch, len*candicate_size]
-                local_acum_logits = tf.concat(local_acum_logits, axis=1)
-                # local_acum_logits:[batch, len * candicate_size] -> [batch, beam_size]
-                # local_id:[batch, beam_size] \in range(len*candicate_size)
-                local_acum_logits, local_id = tf.nn.top_k(local_acum_logits, beam_size)
-                last_beam_id = local_id // seq_length
-                last_beam_id = index_matrix_to_beampairs(last_beam_id)  # [batch, beam_size, 2]
-                sample_id = local_id % seq_length
-                new_acum_logits = tf.unstack(local_acum_logits, axis=1)  # [batch] * beam_size
-                return new_acum_logits, last_beam_id, sample_id
-
-            def beam_select(inputs_l, beam_id):
-                """
-                :param input_l: list of tensors, len(input_l) = k
-                :param beam_id: [batch, k, 2]
-                :return: output_l, list of tensors, len = k
-                """
-
-                def _select(input_l):
-                    input_l = tf.stack(input_l, axis=1)  # [batch, beam_size, ...]
-                    output_l = tf.gather_nd(input_l, beam_id)  # [batch, beam_size, ...]
-                    output_l = tf.unstack(output_l, axis=1)
-                    return output_l
-
-                # [state, state] -> [(h,c),(h,c)] -> [[h,h,h], [c,c,c]]
-                inputs_ta_flat = zip(*[nest.flatten(input_l) for input_l in inputs_l])
-                # [[h,h,h], [c,c,c]] -(beam select)> [[h,h,h], [c,c,c]]
-                outputs_ta_flat = [_select(input_ta) for input_ta in inputs_ta_flat]
-                # [[h,h,h], [c,c,c]] -> [(h,c),(h,c)] -> [state, state]
-                outputs_l = [nest.pack_sequence_as(inputs_l[0], output_ta_flat)
-                             for output_ta_flat in zip(*outputs_ta_flat)]
-                return outputs_l
-
-            def beam_sample(accum_logits, logits, point_mask, state, pre_output_idxs):
-                # sample top_k, last_bema_id:[batch,beam_size], output_idx:[batch,beam_size]
-                accum_logits, last_beam_id, output_idx = top_k(accum_logits,
-                                                               logits)  # [batch, beam_size], 前面那个beam path, 后面哪个节点
-                state = beam_select(state, last_beam_id)
-                point_mask = beam_select(point_mask, last_beam_id)
-                output_idx = tf.unstack(output_idx, axis=1)  # [batch] * beam_size
-                #point_mask = [update_mask(output_idx[i], point_mask[i], seq_length) for i in range(beam_size)]
-                point_mask = [update_mask(output_idx[i], point_mask[i], seq_length) for i in xrange(beam_size)]
-
-                l_output_idx = [tf.expand_dims(t, axis=1)  # [batch, 1] * beam_size
-                                for t in output_idx]
-                if pre_output_idxs is not None:
-                    pre_output_idxs = beam_select(pre_output_idxs, last_beam_id)
-                    output_idxs = map(lambda ts: tf.concat(ts, axis=1), zip(pre_output_idxs, l_output_idx))
-                else:
-                    output_idxs = l_output_idx
-                return accum_logits, point_mask, state, output_idx, output_idxs
+            index_matrix_to_beam_pairs = index_matrix_to_pairs_fn(batch_size, beam_size)
 
             # initial setting
             state = [state] * beam_size  # [batch, state_size] * beam_size
@@ -440,55 +494,18 @@ def pointer_network_rnn_decoder(cell,
             accum_logits = [tf.zeros([batch_size])] * beam_size
 
             accum_logits, point_mask, state, output_idx, output_idxs = \
-                beam_sample(accum_logits, logits, point_mask, state, None)
+                beam_sample(accum_logits, logits, point_mask, state, None, beam_size, seq_length, index_matrix_to_beam_pairs)
             for i in range(1, res_length):
                 logits, state = zip(*[call_cell(output_idx[ik], state[ik], point_mask[ik])  # [batch_size, data_len]
                                       for ik in range(beam_size)])
                 # logits -> log pi
                 logits = [logit_ - tf.reduce_logsumexp(logit_, axis=1, keep_dims=True) for logit_ in logits]
                 accum_logits, point_mask, state, output_idx, output_idxs = \
-                    beam_sample(accum_logits, logits, point_mask, state, output_idxs)
+                    beam_sample(accum_logits, logits, point_mask, state, output_idxs, beam_size, seq_length, index_matrix_to_beam_pairs)
             return accum_logits[0], output_idxs[0], state[0]
         else:
             raise NotImplementedError("unknown mode: %s. Available modes: [SAMPLE, TRAIN, GREEDY, BEAMSEARCH]" % mode)
 # end of pointer_network_rnn_decoder
-
-
-# 返回一个tensor, 如Tensor("my_init_state_0_tiled:0", shape=(3, 2), dtype=float32)
-def trainable_initial_state(batch_size,
-                            state_size,
-                            initializer=None,
-                            name="initial_state"):
-    flat_state_size = nest.flatten(state_size)  # Returns a flat sequence from a given nested structure.
-
-    if not initializer:
-        flat_initializer = tuple(tf.zeros_initializer for _ in flat_state_size)
-    else:
-        flat_initializer = tuple(tf.zeros_initializer for initializer in flat_state_size)
-
-    names = ["{}_{}".format(name, i) for i in range(len(flat_state_size))]
-    tiled_states = []
-
-    # tiled_ta = tf.ones(shape=[batch_size])
-    for name, size, init in zip(names, flat_state_size, flat_initializer):
-        shape_with_batch_dim = [1, size]
-        initial_state_variable = tf.get_variable(
-            name, shape=shape_with_batch_dim, initializer=init())
-
-        # tf.multiply(tiled_ta, initial_state_variable, name=(name + "_tiled"))
-        tiled_state = tf.tile(initial_state_variable,
-                              [batch_size, 1], name=(name + "_tiled"))
-        tiled_states.append(tiled_state)
-
-    return nest.pack_sequence_as(structure=state_size,
-                                 flat_sequence=tiled_states)
-
-def update_mask(output_idx, old_mask, seq_length):
-    # output_idx:[[batch_size]]
-    new_mask_inc = tf.one_hot(output_idx, depth=seq_length, dtype='int32')
-    new_mask = tf.stop_gradient(old_mask + new_mask_inc)
-    # new_mask:[batch_size, seq_length]
-    return new_mask
 
 
 def ctr_dicriminator(user, card, hidden_dim):

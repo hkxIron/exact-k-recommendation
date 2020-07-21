@@ -1,8 +1,5 @@
 # encoding: UTF-8
-
 import tensorflow as tf
-import numpy as np
-
 
 # input:
 # [[3,1,2],
