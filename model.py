@@ -73,14 +73,14 @@ class Generator():
                         ### Multihead Attention
                         # enc: [batch, seq_len, 2*hidden_units]
                         #   => [batch, seq_len, 2*hidden_units]
-                        self.enc = multihead_attention( queries=self.enc,
-                                                        keys=self.enc,
-                                                        values=self.enc,
-                                                        num_units=hp.hidden_units*2,
-                                                        num_heads=hp.num_heads,
-                                                        dropout_rate=hp.dropout_rate,
-                                                        is_training=is_training,
-                                                        causality=False)
+                        self.enc = multihead_attention(queries=self.enc,
+                                                       keys=self.enc,
+                                                       values=self.enc,
+                                                       num_units=hp.hidden_units*2,
+                                                       num_heads=hp.num_heads,
+                                                       dropout_rate=hp.dropout_rate,
+                                                       is_training=is_training,
+                                                       causality=False)
 
                         ### Feed Forward
                         # enc: [batch, seq_len, 2*hidden_units]

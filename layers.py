@@ -193,6 +193,8 @@ def greedy_sample_from_logits(logits, batch_size):
     # logits: [batch, seq_length]
     # return: [batch]
     return tf.cast(tf.argmax(logits, 1), tf.int32)
+
+
 """
 pointer-network decoder
 """
@@ -293,11 +295,12 @@ def pointer_network_rnn_decoder(cell,
 
         # enc_final_states: [batch_size, state_size], encoder的最后一个timestep的state
         # logits: [batch_size, seq_len=enc_outputs.seq_len]
-        # states: [batch_size, state_size]
+        # state: [batch_size, state_size]
         logits, state = call_cell(input_idx=None, state=enc_final_states, point_mask=None)
 
         scope.reuse_variables()
         # logits: [batch_size, seq_len=enc_outputs.seq_len]
+        # output_logits: [timestep, batch_size, seq_len=enc_outputs.seq_len]
         output_logits = [logits]
         # point_mask:[batch_size, seq_length]
         point_mask = tf.zeros([batch_size, seq_length], dtype=tf.int32)
@@ -313,24 +316,47 @@ def pointer_network_rnn_decoder(cell,
             # logits: [batch_size, seq_len=enc_outputs.seq_len]
             # output_idx:[batch_size]
             output_idx = sample_fn(logits, batch_size)  # [batch_size]
+            # output_idxs:[timestep=res_length, batch_size]
             output_idxs = [output_idx]
             # output_idx:[batch_size]
             # point_mask:[batch_size, seq_length]
             point_mask = update_mask(output_idx, point_mask, seq_length)
 
             for i in range(1, res_length):
+                # output_idx:[batch_size]
+                # states: [batch_size, state_size]
+                # point_mask:[batch_size, seq_length]
+                # states: [batch_size, state_size]
+                # logits: [batch_size, seq_len=enc_outputs.seq_len]
                 logits, state = call_cell(output_idx, state, point_mask)  # [batch_size, data_len]
+                # output_logits: [timestep=res_length, batch_size, seq_len=enc_outputs.seq_len]
                 output_logits.append(logits)
-                output_idx = sample_fn(logits)  # [batch_size]
-                point_mask = update_mask(output_idx, point_mask, seq_length)
+                # logits: [batch_size, seq_len=enc_outputs.seq_len]
+                # output_idx:[batch_size]
+                output_idx = sample_fn(logits, batch_size)  # [batch_size]
+                # output_idx:[batch_size]
+                # point_mask:[batch_size, seq_length]
+                point_mask = update_mask(output_idx, point_mask, seq_length) # 更新mask
+                # output_idx:[batch_size]
+                # output_idxs:[timestep=res_length,batch_size]
                 output_idxs.append(output_idx)
+            # output_logits: [batch_size, timestep=res_length, seq_len=enc_outputs.seq_len]
+            # output_idxs:   [batch_size, timestep=res_length]
+            # state: [batch_size, state_size]
             return tf.stack(output_logits, axis=1), tf.stack(output_idxs, axis=1), state
+
         elif mode == "TRAIN":
+            # decoder_target_ids: [batch_size, ]
             output_idxs = tf.unstack(decoder_target_ids, axis=1)
+            # output_idxs:[timestep=res_length,batch_size]
+            # output_idx: [batch_size]
             output_idx = output_idxs[0]  # [batch_size]
+            # output_idx: [batch_size]
+            # point_mask: [batch_size, seq_length]
             point_mask = update_mask(output_idx, point_mask, seq_length)
 
             for i in range(1, res_length):
+                # ouput_idx: [batch_size]
                 logits, state = call_cell(output_idx, state, point_mask)  # [batch_size, data_len]
                 output_logits.append(logits)
                 output_idx = output_idxs[i]  # [batch_size]
@@ -461,6 +487,7 @@ def update_mask(output_idx, old_mask, seq_length):
     # output_idx:[[batch_size]]
     new_mask_inc = tf.one_hot(output_idx, depth=seq_length, dtype='int32')
     new_mask = tf.stop_gradient(old_mask + new_mask_inc)
+    # new_mask:[batch_size, seq_length]
     return new_mask
 
 
