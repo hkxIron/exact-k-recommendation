@@ -277,11 +277,15 @@ def beam_select(inputs_l, beam_id):
                  for output_ta_flat in zip(*outputs_ta_flat)]
     return outputs_l
 
-def beam_sample(accum_logits, logits, point_mask, state, pre_output_idxs,
+def beam_sample(accum_logits,
+                logits,
+                point_mask,
+                state,
+                pre_output_idxs,
                 beam_size,
                 seq_length,
                 index_matrix_to_beam_pairs):
-    # sample top_k, last_bema_id:[batch,beam_size], output_idx:[batch,beam_size]
+    # sample top_k, last_beam_id:[batch,beam_size], output_idx:[batch,beam_size]
     accum_logits, last_beam_id, output_idx = top_k(accum_logits,
                                                    logits,
                                                    accum_logits,
@@ -302,7 +306,6 @@ def beam_sample(accum_logits, logits, point_mask, state, pre_output_idxs,
     else:
         output_idxs = l_output_idx
     return accum_logits, point_mask, state, output_idx, output_idxs
-
 
 """
 pointer-network decoder
@@ -483,18 +486,43 @@ def pointer_network_rnn_decoder(cell,
             return tf.stack(output_logits, axis=1), state
 
         elif mode == "BEAMSEARCH":
+            # index_matrix_to_pairs: [batch_size, beam_size, 2], 最后的一维里的元素是: (sample_index, seq_index)
             index_matrix_to_beam_pairs = index_matrix_to_pairs_fn(batch_size, beam_size)
 
             # initial setting
+            # state: [batch_size, state_size]
+            #     => [batch_size, state_size] * beam_size
             state = [state] * beam_size  # [batch, state_size] * beam_size
+            # point_mask:[batch_size, seq_length]
+            #         => [batch, seq_length] * beam_size
             point_mask = [point_mask] * beam_size  # [batch, data_len] * beam_size
+            """
+            下式计算的是log(概率),推导如下:
+            x - logsumexp(x) 
+            = log(exp(x)) - logsumexp(x) 
+            = log(exp(x)/sumexp(x)) 
+            = log(softmax(x)) = log(Probability(x))
+            这样, 当x比较小时数值计算会比较稳定
+            """
             # logits -> log pi
+            # logits: [batch_size, seq_len=enc_outputs.seq_len]
             logits = logits - tf.reduce_logsumexp(logits, axis=1, keep_dims=True)
+            # logits: [batch_size, seq_len] * beam_size
             logits = [logits] * beam_size  # [batch, data_len] * beam_size
+            # accum_logits: [batch_size] * beam_size
             accum_logits = [tf.zeros([batch_size])] * beam_size
 
+            # accum_logits: [batch_size] * beam_size
+            # logits: [batch_size, seq_len] * beam_size
+            # point_mask:[batch, seq_length] * beam_size
+            # state: [batch, state_size] * beam_size
+            # index_matrix_to_pairs: [batch_size, beam_size, 2], 最后的一维里的元素是: (sample_index, seq_index)
+            #
+            # output_idx: [batch_size]
+            # output_idxs:[timestep=res_length,batch_size]
             accum_logits, point_mask, state, output_idx, output_idxs = \
                 beam_sample(accum_logits, logits, point_mask, state, None, beam_size, seq_length, index_matrix_to_beam_pairs)
+
             for i in range(1, res_length):
                 logits, state = zip(*[call_cell(output_idx[ik], state[ik], point_mask[ik])  # [batch_size, data_len]
                                       for ik in range(beam_size)])
