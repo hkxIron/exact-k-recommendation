@@ -230,7 +230,7 @@ def greedy_sample_from_logits(logits, batch_size):
     # return: [batch]
     return tf.cast(tf.argmax(logits, 1), tf.int32)
 
-def top_k(acum_logits, logits, accum_logits, beam_size, seq_length, index_matrix_to_beam_pairs):
+def top_k(acum_logits, logits, beam_size, seq_length, index_matrix_to_beam_pairs):
     """
     :param acum_logits: [batch] * beam_size
     :param logits: [batch, len] * beam_size
@@ -241,7 +241,7 @@ def top_k(acum_logits, logits, accum_logits, beam_size, seq_length, index_matrix
     # local_acum_logits: [batch, len*beam_size]
     candicate_size = len(logits)
     local_acum_logits = logits
-    if accum_logits is not None:
+    if acum_logits is not None:
         local_acum_logits = [tf.reshape(acum_logits[ik], [-1, 1]) + logits[ik]
                              for ik in range(candicate_size)]
     # local_acum_logits: [batch, len]*candicate_size -> [batch, len*candicate_size]
@@ -288,7 +288,6 @@ def beam_sample(accum_logits,
     # sample top_k, last_beam_id:[batch,beam_size], output_idx:[batch,beam_size]
     accum_logits, last_beam_id, output_idx = top_k(accum_logits,
                                                    logits,
-                                                   accum_logits,
                                                    beam_size,
                                                    seq_length,
                                                    index_matrix_to_beam_pairs)  # [batch, beam_size], 前面那个beam path, 后面哪个节点
