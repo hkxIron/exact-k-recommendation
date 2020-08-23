@@ -9,8 +9,8 @@ class Hyperparams:
     gen_data_train = 'data/' + data_set + '/rerank_data_10c_train.txt'
     gen_data_test = 'data/' + data_set + '/rerank_data_10c_test.txt'
 
-    dis_data_train = 'data/' + data_set + '/dis_data_10c_train.txt'
-    dis_data_test = 'data/' + data_set + '/dis_data_10c_test.txt'
+    discriminator_data_train = 'data/' + data_set + '/dis_data_10c_train.txt'
+    discriminator_data_test = 'data/' + data_set + '/dis_data_10c_test.txt'
 
     user_ids_file = 'data/' + data_set + '/user_ids.txt'
     item_ids_file = 'data/' + data_set + '/item_ids.txt'
@@ -22,15 +22,15 @@ class Hyperparams:
     num_layers = 1 # rnn layer num
     seq_length = 50 # encoder length
     res_length = 10
-    lr_dis = 0.001 # learning rate.
-    lr_gen = 0.001
+    lr_discriminator = 0.001 # learning rate.
+    lr_generator = 0.001
     logdir = 'logdir' # log directory
 
     print_per_step = 10
     test_per_step = 10
 
-    gen_num_epochs = 5
-    dis_num_epochs = 1
+    generator_num_epochs = 5
+    discriminator_num_epochs = 1
 
     # hill climbling
     is_hill_climbing = True
@@ -39,7 +39,7 @@ class Hyperparams:
 
     # model
     hidden_units = 16 # alias = C, for embedding size and rnn cell
-    dis_hidden_size = 128 # for discriminator
+    discriminator_hidden_size = 128 # for discriminator
     num_blocks = 2 # number of encoder/decoder blocks
     num_heads = 2
     dropout_rate = 0.1 # 这里是0.1
@@ -47,7 +47,7 @@ class Hyperparams:
     supervised_coe = 1.0
     schedule_sampling = True
     use_multihead_attention = False
-    use_dis_reward = True
+    use_discriminator_reward = True
 
     # log print
     gen_train_log_path = 'gen_train_log.txt'

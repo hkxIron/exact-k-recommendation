@@ -285,6 +285,13 @@ def beam_sample(accum_logits,
                 beam_size,
                 seq_length,
                 index_matrix_to_beam_pairs):
+    # accum_logits: [batch_size] * beam_size
+    # logits: [batch_size, seq_len] * beam_size
+    # point_mask:[batch, seq_len] * beam_size
+    # state: [batch, state_size] * beam_size
+    # pre_output_idxs:None or [timestep=res_length,batch_size]
+    # index_matrix_to_pairs: [batch_size, beam_size, 2], 最后的一维里的元素是: (sample_index, seq_index)
+
     # sample top_k, last_beam_id:[batch,beam_size], output_idx:[batch,beam_size]
     accum_logits, last_beam_id, output_idx = top_k(accum_logits,
                                                    logits,
@@ -314,7 +321,7 @@ def pointer_network_rnn_decoder(cell,
                                 enc_outputs,
                                 enc_final_states,
                                 seq_length,
-                                res_length,
+                                result_length,
                                 hidden_dim,
                                 num_glimpse,
                                 batch_size,
@@ -398,9 +405,9 @@ def pointer_network_rnn_decoder(cell,
                 # 2.点可用,   masked_logits: max_logit + 1
                 # masked_logits: [batch, seq_length]
                 masked_logits = max_logit + 1 + tf.cast(point_mask, dtype=tf.float32) * (min_logit - 10000 - max_logit)
-                # logits: [batch, seq_length]
+                # logits: [batch, seq_length=encoder_out.seq_len]
                 logits = tf.minimum(logits, tf.stop_gradient(masked_logits)) # mask不需要回传梯度
-            # logits: [batch, seq_length]
+            # logits: [batch, seq_length=enc_output.seq_len]
             # new_state: {c: [batch_size, hidden_dim], h: [batch_size, hidden_dim]}
             return logits, new_state
 
@@ -433,13 +440,14 @@ def pointer_network_rnn_decoder(cell,
             # point_mask:[batch_size, seq_length]
             point_mask = update_mask(output_idx, point_mask, seq_length)
 
-            for i in range(1, res_length):
+            for i in range(1, result_length):
                 # output_idx:[batch_size]
                 # states: [batch_size, state_size]
                 # point_mask:[batch_size, seq_length]
                 # states: [batch_size, state_size]
-                # logits: [batch_size, seq_len=enc_outputs.seq_len]
+                # logits: [batch_size, seq_len=enc_outputs.seq_len], 即可以看出是对每个样本中所有encoder timestep计算概率分布
                 logits, state = call_cell(output_idx, state, point_mask)  # [batch_size, data_len]
+                # logits: [batch_size, seq_len=enc_outputs.seq_len]
                 # output_logits: [timestep=res_length, batch_size, seq_len=enc_outputs.seq_len]
                 output_logits.append(logits) # 每一个decoder output对enc_output的attention分数
                 # logits: [batch_size, seq_len=enc_outputs.seq_len]
@@ -451,7 +459,7 @@ def pointer_network_rnn_decoder(cell,
                 # output_idx:[batch_size]
                 # output_idxs:[timestep=res_length,batch_size]
                 output_idxs.append(output_idx)
-            # return output_logits: [batch_size, timestep=res_length, seq_len=enc_outputs.seq_len]
+            # return output_logits: [batch_size, timestep=res_length, seq_len=enc_outputs.seq_len],即可以看出是对每个样本中所有encoder timestep计算概率分布
             # return output_idxs:   [batch_size, timestep=res_length]
             # return state: [batch_size, state_size]
             return tf.stack(output_logits, axis=1), tf.stack(output_idxs, axis=1), state
@@ -467,7 +475,7 @@ def pointer_network_rnn_decoder(cell,
             # point_mask: [batch_size, seq_length]
             point_mask = update_mask(output_idx, point_mask, seq_length)
 
-            for i in range(1, res_length):
+            for i in range(1, result_length):
                 # output_idx: [batch_size]
                 # state: [batch_size, state_size]
                 # point_mask: [batch_size, seq_length]
@@ -480,7 +488,7 @@ def pointer_network_rnn_decoder(cell,
                 # output_idx: [batch_size]
                 # point_mask: [batch_size, seq_length]
                 point_mask = update_mask(output_idx, point_mask, seq_length)
-            # return output_logits: [batch_size, timestep=res_length, seq_len=enc_outputs.seq_len]
+            # return output_logits: [batch_size, timestep=res_length=card_item_num, seq_len=enc_outputs.seq_len]
             # state: [batch_size, state_size]
             return tf.stack(output_logits, axis=1), state
 
@@ -513,7 +521,7 @@ def pointer_network_rnn_decoder(cell,
 
             # accum_logits: [batch_size] * beam_size
             # logits: [batch_size, seq_len] * beam_size
-            # point_mask:[batch, seq_length] * beam_size
+            # point_mask:[batch, seq_len] * beam_size
             # state: [batch, state_size] * beam_size
             # index_matrix_to_pairs: [batch_size, beam_size, 2], 最后的一维里的元素是: (sample_index, seq_index)
             #
@@ -522,7 +530,7 @@ def pointer_network_rnn_decoder(cell,
             accum_logits, point_mask, state, output_idx, output_idxs = \
                 beam_sample(accum_logits, logits, point_mask, state, None, beam_size, seq_length, index_matrix_to_beam_pairs)
 
-            for i in range(1, res_length):
+            for i in range(1, result_length):
                 logits, state = zip(*[call_cell(output_idx[ik], state[ik], point_mask[ik])  # [batch_size, data_len]
                                       for ik in range(beam_size)])
                 # logits -> log pi
@@ -535,29 +543,44 @@ def pointer_network_rnn_decoder(cell,
 # end of pointer_network_rnn_decoder
 
 
-def ctr_dicriminator(user, card, hidden_dim):
+def ctr_dicriminator(user_embedding, card_item_embedding, hidden_dim):
     '''
-    :param user: [batch_size, user_embedding]
-    :param card: [batch_size, res_len, item_embedding]
+    :param user_embedding: [batch_size, user_embedding_dim]
+    :param card_item_embedding: [batch_size, res_len=card_item_num=4, item_embedding_dim], 其中user_embedding与item_embedding的hidden_dim相等
     :param hidden_dim: dnn hidden dimension
     :return: logit for ctr
     '''
     with tf.variable_scope("ctr_dicriminator"):
 
-        batch_size = user.get_shape()[0].value
+        batch_size = user_embedding.get_shape()[0].value
         if batch_size is None:
-            batch_size = tf.shape(user)[0]
+            batch_size = tf.shape(user_embedding)[0]
 
-        # user_flat: [batch_size, res_len, user_embedding]
-        user_flat = tf.stack(hp.res_length * [user], axis=1)
+        # user_embedding: [batch_size, user_embedding_dim]
+        # user_flat_embedding: [batch_size, res_len, user_embedding_dim]
+        user_flat_embedding = tf.stack(hp.res_length * [user_embedding], axis=1)
 
-        cross_feature = tf.reduce_sum(tf.multiply(user_flat, card), axis=2)
+        # user_flat_embedding: [batch_size, res_len, user_embedding_dim=hidden_dim]
+        # card_item_embedding: [batch_size, res_len = card_item_num = 4, item_embedding_dim=hidden_dim]
+        # user与item的embedding特征对应相乘,然后相加
+        cross_feature = tf.reduce_sum(tf.multiply(user_flat_embedding, card_item_embedding), axis=2)
+        # cross_feature:[batch_size, res_len]
         cross_feature = tf.reshape(cross_feature, shape=[batch_size, -1])
 
-        card_feature = tf.reshape(card, shape=[batch_size, -1])
+        # card_item_embedding: [batch_size, res_len = card_item_num = 4, item_embedding_dim=hidden_dim]
+        # card_feature: [batch_size, res_len*item_embedding_dim]
+        card_feature = tf.reshape(card_item_embedding, shape=[batch_size, -1])
 
-        feature = tf.concat([user, card_feature, cross_feature], axis=1)
-        feature = tf.layers.dense(feature, hidden_dim, activation=tf.nn.relu)
-        logits = tf.layers.dense(feature, 1, activation=None)
+        # user_embedding: [batch_size, user_embedding_dim]
+        # card_feature: [batch_size, res_len*item_embedding_dim]
+        # cross_feature:[batch_size, res_len]
+        # feature: [batch_size, user_embedding_dim+res_len*item_embedding_dim+res_len]
+        feature = tf.concat([user_embedding, card_feature, cross_feature], axis=1)
+        # feature:[batch_size, hidden_dim]
+        feature = tf.layers.dense(feature, units=hidden_dim, activation=tf.nn.relu)
+        # logits:[batch_size, 1]
+        logits = tf.layers.dense(feature, units=1, activation=None)
+        # logits:[batch_size]
         logits = tf.squeeze(logits, axis=[1])
+        # logits:[batch_size]
         return logits

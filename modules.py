@@ -119,11 +119,13 @@ def embedding(inputs,
                                        shape=[vocab_size, num_units],
                                        initializer=tf.random_uniform_initializer(-0.08, 0.08))
         if zero_pad:
-            lookup_table = tf.concat((tf.zeros(shape=[1, num_units]),
-                                      lookup_table[1:, :]), 0)
+            # 将embedding table的第0行置成全0,即padding的值
+            lookup_table = tf.concat(values=(tf.zeros(shape=[1, num_units]), lookup_table[1:, :]),
+                                     axis=0)
         outputs = tf.nn.embedding_lookup(lookup_table, inputs)
         
         if scale:
+            # 是否需要将embedding进行缩放
             outputs = outputs * (num_units ** 0.5) 
             
     return outputs

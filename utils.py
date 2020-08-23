@@ -2,9 +2,9 @@
 import tensorflow as tf
 
 # input:
-# [[3,1,2],
-#  [2,3,1]] -> [[[0, 3], [0, 1], [0, 2]], # 0代表第0个样本, 即 c[i,j,:] = [i,a[i,j]]
-#               [[1, 2], [1, 3], [1, 1]]] # 1代表第1个样本
+# a:[[3,1,2],
+#    [2,3,1]]-> c:[[[0, 3], [0, 1], [0, 2]], # 0代表第0个样本, 即 c[i,j,:] = [i,a[i,j]]
+#                  [[1, 2], [1, 3], [1, 1]]] # 1代表第1个样本
 #
 # input:
 # [3,1,4] => [[0,3], # [sample_index, seq_index]
@@ -18,13 +18,13 @@ def index_matrix_to_pairs_fn(batch_size, seq_length):
     #     ......
     #     [127,127,127,...]]
     replicated_first_indices2 = tf.tile(
-        tf.expand_dims(replicated_first_indices, dim=1),  # [128,1]
-        [1, seq_length])
+        input=tf.expand_dims(replicated_first_indices, dim=1),  # [128,1]
+        multiples=[1, seq_length])
 
     def index_matrix_to_pairs(index_matrix):
         """
-        :param index_matrix: [batch_size, data_len] or [batch_size]
-        :return: [batch_size, data_len, 2] or [batch_size, 2]
+        :param index_matrix: [batch_size, data_len] or [batch_size]即为a
+        :return: [batch_size, data_len, 2] or [batch_size, 2],即为c
         ie:
           a: [128, 10] -> c[i,j,:] = [i,a[i,j]], shape(c) = [128,10,2]
           a: [128] -> c[i,:] = [i,a[i]], shape(c) = [128,2]
@@ -40,6 +40,14 @@ def index_matrix_to_pairs_fn(batch_size, seq_length):
     return index_matrix_to_pairs
 
 
+"""
+data: [[3 4 5]
+       [7 8 9]]
+indices: [[0 2]# 选取下标第0,2的元素
+          [1 0]]# 选取下标第1,0的元素
+out: [[3 5] 
+      [8 7]] 
+"""
 def batch_gather(data, indices):
     """
     一般情况下，data的shape为[batch_size, T], indices的shape为[batch_size, res_length]
@@ -61,14 +69,13 @@ def batch_gather(data, indices):
     flat_data = tf.tile(data, [gather_data_size, 1])
     return tf.transpose(tf.reshape(tf.gather_nd(flat_data, input_index_pairs), (gather_data_size, batch_size)))
 
-
+# card里的item个数为4
 def precision_at_4(card_infer, item_pos):
     res = 0.0
     for i in range(len(card_infer)):
         if item_pos[i] in set(card_infer[i]):
             res += 1.0
     return res / (1.0 * len(card_infer))
-
 
 def precision(card_infer, card):
     res = 0.0
@@ -79,3 +86,26 @@ def precision(card_infer, card):
                 tmp += 1.0
         res += (tmp / (1.0 * len(card_infer[i])))
     return res / (1.0 * len(card_infer))
+
+
+if __name__ == '__main__':
+    print("run test")
+    data =tf.constant([[3, 4, 5],
+                       [7, 8, 9]])
+    indices = tf.constant([[0, 2],
+                           [1, 0]])
+    res = batch_gather(data, indices)
+    with tf.Session() as sess:
+        out = sess.run(res)
+        print("data:", sess.run(data))
+        print("indices:",sess.run(indices))
+        print("out:", out)
+        """
+        data: [[3 4 5]
+         [7 8 9]]
+        indices: [[0 2]
+         [1 0]]
+        out: [[3 5]
+         [8 7]]
+        """
+
