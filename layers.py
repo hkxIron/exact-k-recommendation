@@ -219,7 +219,7 @@ def input_fn(input_idx, index_matrix_to_pairs, enc_outputs):
     return tf.gather_nd(enc_outputs, input_index_pairs)
 
 def random_sample_from_logits(logits, batch_size): # 多项式分布中采样一个
-    # logits:[batch, num_classes=]
+    # logits: [batch_size, seq_len=enc_outputs.seq_len]
     # sampled_idx:[batch, num_samples=1]
     sampled_idx = tf.cast(tf.multinomial(logits=logits, num_samples=1), dtype='int32')  # [batch_size,1]
     sampled_idx = tf.reshape(sampled_idx, [batch_size])  # [batch_size]
@@ -320,8 +320,8 @@ def pointer_network_rnn_decoder(cell,
                                 decoder_target_ids,
                                 enc_outputs,
                                 enc_final_states,
-                                seq_length,
-                                result_length,
+                                seq_length, # encoder_seq_length
+                                result_length, # card_item_len
                                 hidden_dim,
                                 num_glimpse,
                                 batch_size,
@@ -440,6 +440,7 @@ def pointer_network_rnn_decoder(cell,
             # point_mask:[batch_size, seq_length]
             point_mask = update_mask(output_idx, point_mask, seq_length)
 
+            # result_length = card_item_len
             for i in range(1, result_length):
                 # output_idx:[batch_size]
                 # states: [batch_size, state_size]
@@ -475,6 +476,7 @@ def pointer_network_rnn_decoder(cell,
             # point_mask: [batch_size, seq_length]
             point_mask = update_mask(output_idx, point_mask, seq_length)
 
+            # result_length = card_item_len
             for i in range(1, result_length):
                 # output_idx: [batch_size]
                 # state: [batch_size, state_size]
@@ -530,6 +532,7 @@ def pointer_network_rnn_decoder(cell,
             accum_logits, point_mask, state, output_idx, output_idxs = \
                 beam_sample(accum_logits, logits, point_mask, state, None, beam_size, seq_length, index_matrix_to_beam_pairs)
 
+            # result_length = card_item_len
             for i in range(1, result_length):
                 logits, state = zip(*[call_cell(output_idx[ik], state[ik], point_mask[ik])  # [batch_size, data_len]
                                       for ik in range(beam_size)])
@@ -557,7 +560,7 @@ def ctr_dicriminator(user_embedding, card_item_embedding, hidden_dim):
             batch_size = tf.shape(user_embedding)[0]
 
         # user_embedding: [batch_size, user_embedding_dim]
-        # user_flat_embedding: [batch_size, res_len, user_embedding_dim]
+        # user_flat_embedding: [batch_size, res_len=card_item_num=4, user_embedding_dim]
         user_flat_embedding = tf.stack(hp.res_length * [user_embedding], axis=1)
 
         # user_flat_embedding: [batch_size, res_len, user_embedding_dim=hidden_dim]

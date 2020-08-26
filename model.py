@@ -71,7 +71,7 @@ class Generator():
 
             if hp.use_multihead_attention:
                 ## Blocks
-                for i in range(hp.num_blocks):
+                for i in range(hp.num_blocks): # 2层transformer
                     with tf.variable_scope("num_blocks_{}".format(i)):
                         ### Multihead Attention
                         # encoder: [batch, seq_len, 2*hidden_units]
@@ -107,10 +107,9 @@ class Generator():
             encoder_init_state = trainable_initial_state(hp.batch_size, decoder_cell.state_size)
 
             # encoder: [batch, seq_length, 2*hidden_units]
-
             # sampled_logits: [batch_size, res_length=card_item_num=4, seq_length=enoder_outputs.seq_len], 即可以看出是对每个样本中所有encoder timestep计算概率分布
             # sampled_item_index: [batch_size, res_length=card_item_num=4]
-            # 先采样一些样本
+            # 多项式分布采样一个样本
             sampled_logits, sampled_item_index, _ = pointer_network_rnn_decoder(
                 cell=decoder_cell,
                 decoder_target_ids=None,
@@ -127,20 +126,23 @@ class Generator():
 
             # sampled_logits: [batch_size, res_length=card_item_num, seq_length=enoder_outputs.seq_len]
             self.sampled_logits = tf.identity(sampled_logits, name="sampled_logits")
-            # sample_path: [batch_size, res_length=card_item_num]
+            # sampled_item_index: [batch_size, res_length=card_item_num]
             self.sampled_item_index = tf.identity(sampled_item_index, name="sampled_item_index")
+
             # candidate_item: [batch, seq_length=candidate_item_num=20]
             # sampled_item_index: [batch, res_length=card_item_num=4]
+            # sampled_item_seq: [batch, res_length=card_item_num=4]
             self.sampled_item_seq = batch_gather(self.candidate_item, self.sampled_item_index)
 
             # 训练得到decoder_logits
-            # self.decode_target_item_ids is placeholder
+            # self.decode_target_item_idx: [batch, result_length=card_item_num=4]
+            # encoder: [batch, seq_len, 2*hidden_units]
             # decoder_logits: [batch_size, res_length=card_item_num=4, seq_length=enoder_outputs.seq_len], 即可以看出是对每个样本中所有encoder timestep计算概率分布
             decoder_logits, _ = pointer_network_rnn_decoder(
                 cell=decoder_cell,
                 decoder_target_ids=self.decode_target_item_idx,
                 enc_outputs=self.encoder,
-                enc_final_states= encoder_init_state,
+                enc_final_states=encoder_init_state,
                 seq_length=hp.seq_length,
                 result_length=hp.res_length,
                 hidden_dim=hp.hidden_units*2,
@@ -152,6 +154,7 @@ class Generator():
             # decoder_logits: [batch_size, res_length=card_item_num=4, seq_length=enoder_outputs.seq_len]
             self.decoder_logits = tf.identity(decoder_logits, name="dec_logits")
 
+            # 不明白decoder_logits与supervised_logits有什么不同
             # supervised_logits: [batch_size, res_length=card_item_num=4, seq_length=enoder_outputs.seq_len]
             supervised_logits, _ = pointer_network_rnn_decoder(
                 cell=decoder_cell,
@@ -279,6 +282,7 @@ class Discriminator():
                                                      hidden_dim=hp.discriminator_hidden_size)
         # discriminator_probs:[batch]
         self.discriminator_probs = tf.sigmoid(self.discriminator_logits)
+
         # 由于随机猜对的概率是0.5,因此以0.5作为baseline
         self.discriminator_reward = (self.discriminator_probs - 0.5) * 2.0
 

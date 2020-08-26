@@ -21,6 +21,7 @@ if __name__ == '__main__':
         = get_generator_batch_data(is_training=False)
 
     # Construct graph
+    # 注意是name_scope,而不是variable_scope, name_scope只是分组用,而variable_scope是用来区分不同的变量
     with tf.name_scope('Generator'):
         generator = Generator(is_training=True)
     print("generator variable count:", len(tf.get_variable_scope().global_variables()))
@@ -29,14 +30,13 @@ if __name__ == '__main__':
         discriminator = Discriminator(is_training=True, is_testing=False)
     print("disriminator variable count:", len(tf.get_variable_scope().global_variables()))
 
-    tf.get_variable_scope().reuse_variables()
+    tf.get_variable_scope().reuse_variables() # variables重用
     with tf.name_scope('DiscriminatorInfer'):
         discriminator_infer = Discriminator(is_training=False, is_testing=False)
 
     with tf.name_scope('DiscriminatorTest'):
         discriminator_test = Discriminator(is_training=False, is_testing=True)
 
-    # 每个在不同的命名空间中
     with tf.name_scope('GeneratorInfer'):
         generator_infer = Generator(is_training=False)
 
@@ -79,7 +79,11 @@ if __name__ == '__main__':
             # for step in tqdm(range(d.num_batch), total=d.num_batch, ncols=70, leave=False, unit='b'):
             for step in range(discriminator.num_batch):
                 global_step_discriminator = sess.run(discriminator.global_step)
-                _, discriminator_loss, discriminator_accurancy = sess.run([discriminator.train_op, discriminator.discriminator_loss, discriminator.discriminator_accuracy])
+                # 训练discriminator
+                _, discriminator_loss, discriminator_accurancy = \
+                    sess.run([discriminator.train_op,
+                              discriminator.discriminator_loss,
+                              discriminator.discriminator_accuracy])
                 discriminator_loss_total += discriminator_loss
                 discriminator_accurancy_total += discriminator_accurancy
 
@@ -89,6 +93,7 @@ if __name__ == '__main__':
                         (global_step_discriminator + 1),
                         discriminator_loss_total / (1.0 * (global_step_discriminator + 1)),
                         discriminator_accurancy_total / (1.0 * (global_step_discriminator + 1))))
+
                     dis_train_log.write('{}\t{}\t{}\n'.format(
                         (global_step_discriminator + 1),
                         discriminator_loss_total / (1.0 * (global_step_discriminator + 1)),
@@ -99,14 +104,18 @@ if __name__ == '__main__':
                 if (global_step_discriminator + 1) % hp.test_per_step == 0:
                     discriminator_loss_test, discriminator_accurancy_test = 0.0, 0.0
                     for _ in range(discriminator_test.num_batch):
-                        discriminator_loss, discriminator_accurancy = sess.run([discriminator_test.discriminator_loss, discriminator_test.discriminator_accuracy])
+                        discriminator_loss, discriminator_accurancy = \
+                            sess.run([discriminator_test.discriminator_loss,
+                                      discriminator_test.discriminator_accuracy])
                         discriminator_loss_test += discriminator_loss
                         discriminator_accurancy_test += discriminator_accurancy
 
                     discriminator_loss_test /= (1.0 * discriminator_test.num_batch)
                     discriminator_accurancy_test /= (1.0 * discriminator_test.num_batch)
                     print('global_step_discriminator: {}, discriminator_loss_test: {}, discriminator_accurancy_test: {}'.format(
-                        (global_step_discriminator + 1), discriminator_loss_test, discriminator_accurancy_test))
+                        (global_step_discriminator + 1),
+                        discriminator_loss_test,
+                        discriminator_accurancy_test))
                     dis_test_log.write('{}\t{}\t{}\n'.format((global_step_discriminator + 1), discriminator_loss_test, discriminator_accurancy_test))
                     dis_test_log.flush()
 
@@ -137,7 +146,11 @@ if __name__ == '__main__':
             # for step in tqdm(range(g.num_batch), total=g.num_batch, ncols=70, leave=False, unit='b'):
             for step in range(generator_num_batch):
                 user, card_item, card_item_idx, candidate_item, pos_item = \
-                    sess.run([generator_user, generator_card_item, generator_card_idx, generator_candidate_item, generator_pos_item])
+                    sess.run([generator_user,
+                              generator_card_item,
+                              generator_card_idx,
+                              generator_candidate_item,
+                              generator_pos_item])
 
                 if hp.is_hill_climbing:
                     samples = []
@@ -152,7 +165,8 @@ if __name__ == '__main__':
                         item_cand_i = np.tile(candidate_item[i], reps=(hp.num_hill_climb, 1))
                         # 用generator生成序列
                         # sample_path: [batch_size, res_length]
-                        hill_sampled_card_item_idx, hill_sampled_card_item = sess.run([generator.sampled_item_index, generator.sampled_item_seq],
+                        hill_sampled_card_item_idx, hill_sampled_card_item = sess.run([generator.sampled_item_index,
+                                                                                       generator.sampled_item_seq],
                                                                                       feed_dict={generator.user: user_i,
                                                                                                  generator.candidate_item: item_cand_i})
                         # 用discriminator推断reward
@@ -162,9 +176,9 @@ if __name__ == '__main__':
                         # 按reward进行降序排序
                         sorted_list = sorted(list(zip(hill_sampled_card_item, hill_sampled_card_item_idx, hill_reward)),
                                              key=lambda x: x[2], reverse=True)
-                        samples.append(sorted_list[np.random.choice(hp.top_k_candidate)]) #从list中随机选取3个item, top_k_candidate=3
+                        samples.append(sorted_list[np.random.choice(hp.top_k_candidate)]) #从list的前top_k_candidate=3个中随机选取1个item
 
-                        # 以前这个user的reward未被记录
+                        # 将这个user最高的reward记录下来
                         if user[i] not in memory_reward:
                             memory_reward[user[i]] = sorted_list[0][2]
                             memory_card_item_idx[user[i]] = sorted_list[0][1]
@@ -176,10 +190,12 @@ if __name__ == '__main__':
                                 memory_card_item[user[i]] = sorted_list[0][0]
                     # 将采样的batch个样本以及reward返回
                     (sampled_card_item, sampled_card_item_idx, reward) = zip(*samples)
+
                 else:
                     # sample
                     # 用generator生成序列, 与爬山法不同, 每个user只采样一次
-                    sampled_card_item_idx, sampled_card_item = sess.run([generator.sampled_item_index, generator.sampled_item_seq],
+                    sampled_card_item_idx, sampled_card_item = sess.run([generator.sampled_item_index,
+                                                                         generator.sampled_item_seq],
                                                                         feed_dict={generator.user: user,
                                                                                    generator.candidate_item: candidate_item})
 
@@ -196,7 +212,7 @@ if __name__ == '__main__':
                                 reward.append(-1.0)
 
                 # train generator
-                sess.run(generator.train_op, feed_dict={generator.decode_target_item_idx: sampled_card_item_idx,
+                sess.run(generator.train_op, feed_dict={generator.decode_target_item_idx: sampled_card_item_idx, # 采样的作为target
                                                         generator.reward: reward,
                                                         generator.candidate_item: candidate_item,
                                                         generator.user: user,
@@ -230,8 +246,11 @@ if __name__ == '__main__':
                     precision_at_4_test, precision_test, reward_test = 0.0, 0.0, 0.0
                     for _ in range(generator_num_batch_test):
                         user_test, card_item_test, candidate_item_test, pos_item_test \
-                            = sess.run([generator_user_test, generator_card_item_test,
-                                        generator_candidate_item_test, generator_pos_item_test])
+                            = sess.run([generator_user_test,
+                                        generator_card_item_test,
+                                        generator_candidate_item_test,
+                                        generator_pos_item_test])
+
                         beamsearch_card_item_test = sess.run(generator_infer.infer_card_item,
                                                              feed_dict={generator_infer.candidate_item: candidate_item_test,
                                                                         generator_infer.user: user_test})
@@ -241,7 +260,7 @@ if __name__ == '__main__':
                                           feed_dict={discriminator_infer.card_item: beamsearch_card_item_test,
                                                      discriminator_infer.user: user_test})
                         reward_test += np.mean(reward)
-
+                    # ------------------------
                     reward_test /= (1.0 * generator_num_batch_test)
                     precision_at_4_test /= (1.0 * generator_num_batch_test)
                     precision_test /= (1.0 * generator_num_batch_test)
