@@ -20,8 +20,10 @@ class Hyperparams:
     num_glimpse = 1
     beam_size = 3
     num_layers = 1 # rnn layer num
-    seq_length = 50 # encoder length
-    res_length = 10
+
+    encoder_seq_length = 50 # encoder seq length,即候选item个数
+    res_length = 10 # card_item_num,最终展示到card中的个数,也就是淘宝手机上一屏展示的商品个数
+
     lr_discriminator = 0.001 # learning rate.
     lr_generator = 0.001
     logdir = 'logdir' # log directory

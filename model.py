@@ -10,14 +10,13 @@ from data_load_ml import *
 from modules import *
 from utils import *
 
-
 class Generator():
     def __init__(self, is_training=True):
 
         # user: [batch]
         self.user = tf.placeholder(tf.int32, shape=(None,))
         # candidate_item: [batch, seq_length=candidate_item_num=20]
-        self.candidate_item = tf.placeholder(tf.int32, shape=(None, hp.seq_length))
+        self.candidate_item = tf.placeholder(tf.int32, shape=(None, hp.encoder_seq_length))
         # card_item_idx: [batch, result_length=card_item_num=4]
         self.card_item_idx = tf.placeholder(tf.int32, shape=(None, hp.res_length))
 
@@ -61,7 +60,7 @@ class Generator():
             # embedding_item:[batch_size, seq_len, hidden_units]
             # encoder: [batch, seq_len, 2*hidden_units]
             # 将user与item的embedding concat起来
-            self.encoder = tf.concat([tf.stack(hp.seq_length * [self.embedding_user], axis=1), self.embedding_item], axis=2)
+            self.encoder = tf.concat([tf.stack(hp.encoder_seq_length * [self.embedding_user], axis=1), self.embedding_item], axis=2)
 
             # Dropout
             # enc: [batch, seq_len, 2*hidden_units]
@@ -75,7 +74,7 @@ class Generator():
                     with tf.variable_scope("num_blocks_{}".format(i)):
                         ### Multihead Attention
                         # encoder: [batch, seq_len, 2*hidden_units]
-                        #   => [batch, seq_len, 2*hidden_units]
+                        #       => [batch, seq_len, 2*hidden_units]
                         self.encoder = multihead_attention(queries=self.encoder,
                                                            keys=self.encoder,
                                                            values=self.encoder,
@@ -115,7 +114,7 @@ class Generator():
                 decoder_target_ids=None,
                 enc_outputs=self.encoder,
                 enc_final_states=encoder_init_state,
-                seq_length=hp.seq_length,
+                seq_length=hp.encoder_seq_length,
                 result_length=hp.res_length,
                 hidden_dim=hp.hidden_units*2,
                 num_glimpse=hp.num_glimpse,
@@ -132,7 +131,7 @@ class Generator():
             # candidate_item: [batch, seq_length=candidate_item_num=20]
             # sampled_item_index: [batch, res_length=card_item_num=4]
             # sampled_item_seq: [batch, res_length=card_item_num=4]
-            self.sampled_item_seq = batch_gather(self.candidate_item, self.sampled_item_index)
+            self.sampled_item_seq = batch_gather(self.candidate_item, self.sampled_item_index) # 将item index转换为真正的item_id
 
             # 训练得到decoder_logits
             # self.decode_target_item_idx: [batch, result_length=card_item_num=4]
@@ -143,7 +142,7 @@ class Generator():
                 decoder_target_ids=self.decode_target_item_idx,
                 enc_outputs=self.encoder,
                 enc_final_states=encoder_init_state,
-                seq_length=hp.seq_length,
+                seq_length=hp.encoder_seq_length,
                 result_length=hp.res_length,
                 hidden_dim=hp.hidden_units*2,
                 num_glimpse=hp.num_glimpse,
@@ -161,7 +160,7 @@ class Generator():
                 decoder_target_ids=self.card_item_idx,
                 enc_outputs=self.encoder,
                 enc_final_states=encoder_init_state,
-                seq_length=hp.seq_length,
+                seq_length=hp.encoder_seq_length,
                 result_length=hp.res_length,
                 hidden_dim=hp.hidden_units*2,
                 num_glimpse=hp.num_glimpse,
@@ -178,7 +177,7 @@ class Generator():
                 decoder_target_ids=None,
                 enc_outputs=self.encoder,
                 enc_final_states=encoder_init_state,
-                seq_length=hp.seq_length,
+                seq_length=hp.encoder_seq_length,
                 result_length=hp.res_length,
                 hidden_dim=hp.hidden_units*2,
                 num_glimpse=hp.num_glimpse,
@@ -186,6 +185,7 @@ class Generator():
                 mode="BEAMSEARCH",
                 reuse=True,
                 beam_size=hp.beam_size)
+
             # infer_card_item_idx: [batch_size, res_length = card_item_num = 4]
             self.infer_card_item_idx = tf.identity(infer_card_item_idx, name="infer_card_item_idx")
             # candidate_item:     [batch, seq_length=candidate_item_num=20]
@@ -195,7 +195,6 @@ class Generator():
 
         if is_training:
             # Loss
-            # self.y_smoothed = label_smoothing(tf.one_hot(self.decode_target_ids, depth=hp.data_length))
             # decoder_logits: [batch_size, res_length=card_item_num=4, seq_length=enoder_outputs.seq_len]
             # decode_target_item_idx: [batch, result_length=card_item_num=4]
             # reinforcement_loss: [batch]

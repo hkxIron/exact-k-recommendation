@@ -51,14 +51,17 @@ def trainable_initial_state(batch_size,
 
         # tf.multiply(tiled_ta, initial_state_variable, name=(name + "_tiled"))
         tiled_state = tf.tile(initial_state_variable,
-                              [batch_size, 1], name=(name + "_tiled"))
+                              [batch_size, 1],
+                              name=(name + "_tiled"))
         tiled_states.append(tiled_state)
 
     return nest.pack_sequence_as(structure=state_size,
                                  flat_sequence=tiled_states)
 
 def update_mask(output_idx, old_mask, seq_length):
-    # output_idx:[[batch_size]]
+    # output_idx: [batch_size]
+    # point_mask: [batch_size, seq_length]
+    # seq_length = encoder_seq_length
     new_mask_inc = tf.one_hot(output_idx, depth=seq_length, dtype='int32')
     new_mask = tf.stop_gradient(old_mask + new_mask_inc)
     # new_mask:[batch_size, seq_length]
@@ -218,6 +221,7 @@ def input_fn(input_idx, index_matrix_to_pairs, enc_outputs):
     input_index_pairs = tf.stop_gradient(index_matrix_to_pairs(input_idx))
     return tf.gather_nd(enc_outputs, input_index_pairs)
 
+# 疑问: 多项式采样如何实现梯度反向传播呢?
 def random_sample_from_logits(logits, batch_size): # 多项式分布中采样一个
     # logits: [batch_size, seq_len=enc_outputs.seq_len]
     # sampled_idx:[batch, num_samples=1]
@@ -354,6 +358,7 @@ def pointer_network_rnn_decoder(cell,
         # 多次decode计算attention时，计算encoder参数只计算一次
         enc_refs_dict = {}
         dec_qs = {}
+
         # 存储已经decoder的序列,用于计算intra-attention
         output_ref = []
         # index_matrix_to_pairs: [batch_size, seq_length, 2], 最后的一维里的元素是: (sample_index, seq_index)
