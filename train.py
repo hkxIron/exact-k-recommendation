@@ -15,7 +15,13 @@ from model import Generator, Discriminator
 
 if __name__ == '__main__':
     # load generator data, 生成器的数据
-    generator_user, generator_card_item, generator_card_idx, generator_candidate_item, generator_pos_item, generator_num_batch \
+    # user:[batch]
+    # card_item:[batch,card_item_num=10]
+    # card_item_idx:[batch,card_item_num]
+    # candidate_item:[batch, candidate_item_num]
+    # pos_item:[batch]
+    # num_batch:scalar
+    generator_user, generator_card_item, generator_card_item_idx, generator_candidate_item, generator_pos_item, generator_num_batch \
         = get_generator_batch_data(is_training=True)
     generator_user_test, generator_card_item_test, _, generator_candidate_item_test, generator_pos_item_test, generator_num_batch_test \
         = get_generator_batch_data(is_training=False)
@@ -67,8 +73,8 @@ if __name__ == '__main__':
     sess_config = tf.ConfigProto(allow_soft_placement=True, gpu_options=gpu_options)
 
     with sv.managed_session(config=sess_config) as sess:
+        # 1.先训练Discriminator
         print('Discriminator training start!')
-
         discriminator_accurancy_best = 0.0
         discriminator_loss_total, discriminator_accurancy_total = 0.0, 0.0
         for epoch in range(1, hp.discriminator_num_epochs + 1): # discriminator训练一次
@@ -116,7 +122,8 @@ if __name__ == '__main__':
                         (global_step_discriminator + 1),
                         discriminator_loss_test,
                         discriminator_accurancy_test))
-                    dis_test_log.write('{}\t{}\t{}\n'.format((global_step_discriminator + 1), discriminator_loss_test, discriminator_accurancy_test))
+                    dis_test_log.write('{}\t{}\t{}\n'.format((global_step_discriminator + 1),
+                                                             discriminator_loss_test, discriminator_accurancy_test))
                     dis_test_log.flush()
 
                     # 将最好的discriminator保存成文件
@@ -126,10 +133,11 @@ if __name__ == '__main__':
                         sv.saver.save(sess, hp.logdir + '/model/best_model')
 
         print('Discriminator training done!')
-
         # 恢复最好的discriminator
         sv.saver.restore(sess, hp.logdir + '/model/best_model')
 
+
+        # 2.再训练Generator
         print('Generator training start!')
         # 记录sample到的最好的结果
         memory_reward = {}
@@ -138,9 +146,8 @@ if __name__ == '__main__':
 
         precision_at_4_best, precision_best = 0.0, 0.0
         reward_total, precision_at_4_total, precision_total = 0.0, 0.0, 0.0
-        for epoch in range(1, hp.generator_num_epochs + 1):
-            if sv.should_stop():
-                break
+        for epoch in range(1, hp.generator_num_epochs + 1): # num_epochs:5
+            if sv.should_stop(): break
             print('Generator epoch: ', epoch)
 
             # for step in tqdm(range(g.num_batch), total=g.num_batch, ncols=70, leave=False, unit='b'):
@@ -148,10 +155,11 @@ if __name__ == '__main__':
                 user, card_item, card_item_idx, candidate_item, pos_item = \
                     sess.run([generator_user,
                               generator_card_item,
-                              generator_card_idx,
+                              generator_card_item_idx,
                               generator_candidate_item,
                               generator_pos_item])
-
+                # A.用爬山法多路采样
+                # 每个user与candidate_item_seq进行32次采样搜索,从中选取最优的item
                 if hp.is_hill_climbing:
                     samples = []
                     for i in range(hp.batch_size):
@@ -161,20 +169,26 @@ if __name__ == '__main__':
                         # candidate_item:[batch, candidate_item_num=20]
                         # candidate_item[i]: [1, candidate_item_num=20]
                         # item_cand_i: [num_hill_climb, candidate_item_num=20]
-                        user_i = np.tile(user[i], reps=(hp.num_hill_climb)) # 每个user生成num_hill_climb个样本,同时进行探索
+                        user_i = np.tile(user[i], reps=(hp.num_hill_climb)) # 每个user生成num_hill_climb=32个样本,同时进行采样探索
                         item_cand_i = np.tile(candidate_item[i], reps=(hp.num_hill_climb, 1))
-                        # 用generator生成序列
-                        # sample_path: [batch_size, res_length]
+                        # 用generator生成采样序列
+                        # hill_sampled_card_item_idx: [batch_size, res_length=card_item_num]
+                        # hill_sampled_card_item: [batch_size, res_length=card_item_num]
                         hill_sampled_card_item_idx, hill_sampled_card_item = sess.run([generator.sampled_item_index,
                                                                                        generator.sampled_item_seq],
                                                                                       feed_dict={generator.user: user_i,
                                                                                                  generator.candidate_item: item_cand_i})
-                        # 用discriminator推断reward
+                        # 用discriminator推断采样的序列的reward
+                        # hill_reward:[batch]
                         hill_reward = sess.run(discriminator_infer.discriminator_reward,
                                                feed_dict={discriminator_infer.card_item: hill_sampled_card_item,
                                                           discriminator_infer.user: user_i})
-                        # 按reward进行降序排序
-                        sorted_list = sorted(list(zip(hill_sampled_card_item, hill_sampled_card_item_idx, hill_reward)),
+                        # 对采样序列按reward进行降序排序
+                        # hill_sampled_card_item:     [batch_size, res_length=card_item_num]
+                        # hill_sampled_card_item_idx: [batch_size, res_length=card_item_num]
+                        sorted_list = sorted(list(zip(hill_sampled_card_item,
+                                                      hill_sampled_card_item_idx,
+                                                      hill_reward)),
                                              key=lambda x: x[2], reverse=True)
                         samples.append(sorted_list[np.random.choice(hp.top_k_candidate)]) #从list的前top_k_candidate=3个中随机选取1个item
 
@@ -189,17 +203,24 @@ if __name__ == '__main__':
                                 memory_card_item_idx[user[i]] = sorted_list[0][1]
                                 memory_card_item[user[i]] = sorted_list[0][0]
                     # 将采样的batch个样本以及reward返回
+                    # sampled_card_item:     [batch_size, res_length=card_item_num]
+                    # sampled_card_item_idx: [batch_size, res_length=card_item_num]
+                    # reward:[batch]
                     (sampled_card_item, sampled_card_item_idx, reward) = zip(*samples)
 
                 else:
-                    # sample
+                    # B.只用一路采样
                     # 用generator生成序列, 与爬山法不同, 每个user只采样一次
+                    # sampled_item_index: [batch, res_length=card_item_num]
+                    # sampled_card_item:  [batch, res_length=card_item_num=4]
                     sampled_card_item_idx, sampled_card_item = sess.run([generator.sampled_item_index,
                                                                          generator.sampled_item_seq],
                                                                         feed_dict={generator.user: user,
                                                                                    generator.candidate_item: candidate_item})
 
                     if hp.use_discriminator_reward: # 使用判别器的reward
+                        # reward:[batch]
+                        # sampled_card_item: [batch, res_length=card_item_num]
                         reward = sess.run(discriminator_infer.discriminator_reward,
                                           feed_dict={discriminator_infer.card_item: sampled_card_item,
                                                      discriminator_infer.user: user})
@@ -212,8 +233,8 @@ if __name__ == '__main__':
                                 reward.append(-1.0)
 
                 # train generator
-                sess.run(generator.train_op, feed_dict={generator.decode_target_item_idx: sampled_card_item_idx, # 采样的作为target
-                                                        generator.reward: reward,
+                sess.run(generator.train_op, feed_dict={generator.decode_target_item_idx: sampled_card_item_idx, # 采样的card_item_index作为target
+                                                        generator.reward: reward, # 生成器采样的序列产生的reward
                                                         generator.candidate_item: candidate_item,
                                                         generator.user: user,
                                                         generator.card_item_idx: card_item_idx})
@@ -221,6 +242,7 @@ if __name__ == '__main__':
                 reward_total += np.mean(reward)
 
                 # beamsearch
+                # beamsearch_card_item: [batch, res_length=card_item_num=4]
                 beamsearch_card_item = sess.run(generator_infer.infer_card_item,
                                                 feed_dict={generator_infer.candidate_item: candidate_item,
                                                            generator_infer.user: user})

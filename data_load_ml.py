@@ -43,7 +43,7 @@ def load_generator_data(file_path):
             CANDIDATE_ITEM.append(candidate_items) # sorted
 
             item_candidate_to_idx_map = {}
-            for idx, candidate_item in enumerate(candidate_items):
+            for idx, candidate_item in enumerate(candidate_items): # 当前样本里这个item的index
                 item_candidate_to_idx_map[candidate_item] = idx
             # 计算每个展示card中的item在candidate list中的index
             card_item_index = [item_candidate_to_idx_map[item] for item in card_items]
@@ -74,9 +74,9 @@ def get_generator_batch_data(is_training=True):
 
     # Convert to tensor
     USER = tf.convert_to_tensor(USER, tf.int32) # [batch_size]
-    CARD_ITME = tf.convert_to_tensor(CARD_ITME, tf.int32) # [batch_size, card_item_num=4], 每个card只展示4个item
-    CARD_ITEM_IDX = tf.convert_to_tensor(CARD_ITEM_IDX, tf.int32) # [batch_size, card_item_num=4]
-    CANDIDATE_ITEM = tf.convert_to_tensor(CANDIDATE_ITEM, tf.int32) # [batch_size, candidate_time_num=20]
+    CARD_ITME = tf.convert_to_tensor(CARD_ITME, tf.int32) # [batch_size, card_item_num=10], 每个card只展示10个item
+    CARD_ITEM_IDX = tf.convert_to_tensor(CARD_ITEM_IDX, tf.int32) # [batch_size, card_item_num=10]
+    CANDIDATE_ITEM = tf.convert_to_tensor(CANDIDATE_ITEM, tf.int32) # [batch_size, candidate_itme_num=20]
     POS_ITEM = tf.convert_to_tensor(POS_ITEM, tf.int32) # [batch_size],正样本,应该是需要预测的正样本
     # ITEM_CAND_NEG = tf.convert_to_tensor(ITEM_CAND_NEG, tf.int32) # [batch_size, 19]
 
@@ -92,6 +92,12 @@ def get_generator_batch_data(is_training=True):
                                min_after_dequeue=batch_size * 32,
                                allow_smaller_final_batch=False)
     # card_neg = tf.random_crop(item_cand_neg, size=[hp.batch_size, hp.res_length])
+    # user:[batch]
+    # card_item:[batch,card_item_num=10]
+    # card_item_idx:[batch,card_item_num]
+    # candidate_item:[batch, candidate_item_num]
+    # pos_item:[batch]
+    # num_batch:scalar
     return user, card_item, card_item_idx, candidate_item, pos_item, num_batch
 
 #####################################
@@ -101,7 +107,7 @@ def load_discriminator_data(file_path):
     item2idx, _ = load_item_vocab()
 
     USER, CARD_ITEMS, LABEL = [], [], []
-    # 格式:user,item list,label
+    # 格式:user,item list(长度为10),label
     # 683	511,911,754,286,914,358,344,312,683,347	1
     with open(file_path, 'r') as fin:
         for line in fin:

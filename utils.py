@@ -71,21 +71,25 @@ def batch_gather(data, indices):
 
 # card里的item个数为4
 def precision_at_4(card_infer, item_pos):
-    res = 0.0
-    for i in range(len(card_infer)):
-        if item_pos[i] in set(card_infer[i]):
-            res += 1.0
-    return res / (1.0 * len(card_infer))
+    # card_item_infer: [batch, res_length=card_item_num]
+    # item_pos:      [batch]
+    acc_sum = 0.0
+    for sample_index in range(len(card_infer)):
+        if item_pos[sample_index] in set(card_infer[sample_index]):
+            acc_sum += 1.0
+    return acc_sum / (1.0 * len(card_infer))
 
-def precision(card_infer, card):
-    res = 0.0
-    for i in range(len(card_infer)):
+def precision(card_infer, card_label):
+    # card_item_infer: [batch, res_length=card_item_num]
+    # card_label:      [batch, res_length=card_item_num]
+    acc_sum = 0.0
+    for sample_index in range(len(card_infer)):
         tmp = 0.0
-        for x in card_infer[i]:
-            if x in set(card[i]):
-                tmp += 1.0
-        res += (tmp / (1.0 * len(card_infer[i])))
-    return res / (1.0 * len(card_infer))
+        for x in card_infer[sample_index]:
+            if x in set(card_label[sample_index]): #当前item在card_label中
+                tmp += 1.0 # 分数+1
+        acc_sum += (tmp / (1.0 * len(card_infer[sample_index]))) # 当前样本预测的item中,有几个是在label中,算一个准确率
+    return acc_sum / (1.0 * len(card_infer)) # 所有样本的平均准确率
 
 
 if __name__ == '__main__':
