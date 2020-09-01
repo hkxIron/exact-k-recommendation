@@ -277,43 +277,42 @@ def greedy_sample_from_logits(logits, batch_size):
 # beam_size:32
 # encoder_seq_length=candidate_item_num=50
 # index_matrix_to_pairs: [batch_size, beam_size, 2], 最后的一维里的元素是: (sample_index, seq_index)
-def top_k(acum_logits,
+def top_k(accum_logits,
           logits,
           beam_size,
           encoder_seq_length,
           index_matrix_to_beam_pairs):
     """
-    :param acum_logits: [batch] * beam_size
+    :param accum_logits: [batch] * beam_size
     :param logits: [batch, len] * beam_size
 
     :return
-      new_acum_logits [batch] * beam_size,
+      new_accum_logits [batch] * beam_size,
       last_beam_id [batch, beam_size],
       sample_id [batch, beam_size]
     """
-
     beam_candidate_size = len(logits) # beam_candidate_size=beam_size
-    # local_acum_logits: [batch, seq_len]*beam_size
-    local_acum_logits = logits
+    # local_accum_logits: [batch, seq_len]*beam_size
+    local_accum_logits = logits
     # accum_logits: [batch_size] * beam_size
-    if acum_logits is not None:
+    if accum_logits is not None:
         # accum_logits: [batch] * beam_size, acum_logits[i]是取beam_size里第i个batch
         #   => accum_logits[ik]:[batch]
         # logits: [batch, seq_len] * beam_size
         #   => logits[ik]: [batch, seq_len]
         #
-        # local_acum_logits: [batch, seq_len]*beam_size
-        local_acum_logits = [tf.reshape(acum_logits[ik], shape=[-1, 1]) + logits[ik]
-                                for ik in range(beam_candidate_size)]
+        # local_accum_logits: [batch, seq_len]*beam_size
+        local_accum_logits = [tf.reshape(accum_logits[ik], shape=[-1, 1]) + logits[ik]
+                              for ik in range(beam_candidate_size)]
 
-    # local_acum_logits: [batch, seq_len]*beam_candidate_size
+    # local_accum_logits: [batch, seq_len]*beam_candidate_size
     #                 -> [batch, seq_len*beam_candidate_size]
-    local_acum_logits = tf.concat(local_acum_logits, axis=1)
+    local_accum_logits = tf.concat(local_accum_logits, axis=1)
 
-    # local_acum_logits:[batch, seq_len * beam_candidate_size]
+    # local_accum_logits:[batch, seq_len * beam_candidate_size]
     #                => [batch, beam_size], 被选中的local_acum_logits
     # local_top_idx:[batch, beam_size], idx的范围是 0~seq_len*beam_size
-    local_acum_logits, local_top_idx = tf.nn.top_k(local_acum_logits, k=beam_size)
+    local_accum_logits, local_top_idx = tf.nn.top_k(local_accum_logits, k=beam_size)
 
     # local_top_idx:[batch, beam_size], idx的范围是 0 ~ seq_len*beam_size
     # last_beam_id: [batch, beam_size], idx的范围是:0 ~ beam_size
@@ -321,29 +320,29 @@ def top_k(acum_logits,
 
     # index_matrix_to_pairs: [batch_size, beam_size, 2], 最后的一维里的元素是: (sample_index, seq_index)
     # last_beam_id: [batch, beam_size]
-    #            => [batch, beam_size, 2] TODO: 维度对不上?
+    #            => [batch, beam_size, 2] TODO: 维度对不上
     last_beam_id = index_matrix_to_beam_pairs(last_beam_id)  # [batch, beam_size, 2]
 
     # local_top_idx:[batch, beam_size], idx的范围是:0~ seq_len*beam_size
     # sample_id:    [batch, beam_size], idx的范围是:0~seq_len
     sample_id = local_top_idx % encoder_seq_length # 取余
 
-    # local_acum_logits: [batch, beam_size]
-    # new_accu_logits:   [batch]*beam_size
-    new_acum_logits = tf.unstack(local_acum_logits, axis=1)  # [batch] * beam_size
-    return new_acum_logits, last_beam_id, sample_id
+    # local_accum_logits: [batch, beam_size]
+    # new_accum_logits:   [batch]*beam_size
+    new_accum_logits = tf.unstack(local_accum_logits, axis=1)  # [batch] * beam_size
+    return new_accum_logits, last_beam_id, sample_id
 
 def beam_select(inputs_l, beam_id):
     """
-    :param input_l: list of tensors, len(input_l) = k
-    :param beam_id: [batch, k, 2]
-    :return: output_l, list of tensors, len = k
+    :param input_l: list of tensors, len(input_l) = k, shape:[batch, state_size] * beam_size
+    :param beam_id: [batch, k, 2], shape:[batch, beam_size, 2]
+    :return: output_l, list of tensors, len = k,
     """
 
     def _select(input_l):
         input_l = tf.stack(input_l, axis=1)  # [batch, beam_size, ...]
         output_l = tf.gather_nd(input_l, beam_id)  # [batch, beam_size, ...]
-        output_l = tf.unstack(output_l, axis=1)
+        output_l = tf.unstack(output_l, axis=1) # [batch, ...]*beam_size
         return output_l
 
     # [state, state] -> [(h,c),(h,c)] -> [[h,h,h], [c,c,c]]
@@ -371,8 +370,8 @@ def beam_sample(accum_logits,
     # index_matrix_to_pairs: [batch_size, beam_size, 2], 最后的一维里的元素是: (sample_index, seq_index)
 
     # sample top_k =>
-    # accum_logits: [batch, beam_size]
-    # last_beam_id: [batch, beam_size],
+    # accum_logits: [batch]*beam_size
+    # last_beam_id: [batch, beam_size, 2]
     # output_idx:   [batch, beam_size]
     accum_logits, last_beam_id, output_idx = top_k(accum_logits,
                                                    logits,
@@ -380,19 +379,36 @@ def beam_sample(accum_logits,
                                                    encoder_seq_length,
                                                    index_matrix_to_beam_pairs)  # [batch, beam_size], 前面那个beam path, 后面哪个节点
 
+    # state: [batch, state_size] * beam_size
+    # last_beam_id: [batch, beam_size,2]
+    # =>
+    # state:[batch, state_size] * beam_size
     state = beam_select(state, last_beam_id)
+    # point_mask:[batch, seq_len] * beam_size
     point_mask = beam_select(point_mask, last_beam_id)
+    # output_idx:   [batch, beam_size]
+    # => [batch] * beam_size
     output_idx = tf.unstack(output_idx, axis=1)  # [batch] * beam_size
-    #point_mask = [update_mask(output_idx[i], point_mask[i], seq_length) for i in range(beam_size)]
+    # point_mask: [batch,seq_len]*beam_size
     point_mask = [update_mask(output_idx[i], point_mask[i], encoder_seq_length) for i in xrange(beam_size)]
 
+    # output_idx:  [batch] * beam_size
+    # l_output_idx:[batch, 1] * beam_size
     l_output_idx = [tf.expand_dims(t, axis=1)  # [batch, 1] * beam_size
-                    for t in output_idx]
+                        for t in output_idx]
     if pre_output_idxs is not None:
+        # pre_output_idxs: [timestep = res_length, batch]
+        # last_beam_id: [batch, beam_size, 2]
         pre_output_idxs = beam_select(pre_output_idxs, last_beam_id)
         output_idxs = map(lambda ts: tf.concat(ts, axis=1), zip(pre_output_idxs, l_output_idx))
     else:
+        # [batch, 1] * beam_size
         output_idxs = l_output_idx
+    # accum_logits:[batch]*beam_size
+    # point_mask:  [batch,seq_len]*beam_size
+    # state:       [batch, state_size] * beam_size
+    # output_idx:  [batch] * beam_size
+    # output_idxs: [batch, 1] * beam_size
     return accum_logits, point_mask, state, output_idx, output_idxs
 
 """
@@ -642,9 +658,9 @@ def pointer_network_rnn_decoder(cell,
             # point_mask:[batch, seq_len] * beam_size
             # state: [batch, state_size] * beam_size
             # index_matrix_to_pairs: [batch_size, beam_size, 2], 最后的一维里的元素是: (sample_index, seq_index)
-            #
-            # accum_logits: []
-            # point_mask:   []
+            # =>
+            # accum_logits: [batch_size] * beam_size
+            # point_mask:   [batch, seq_len] * beam_size
             # state: []
             # output_idx: [batch_size]
             # output_idxs:[timestep=res_length,batch_size]
