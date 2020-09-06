@@ -46,19 +46,18 @@ def trainable_initial_state(batch_size,
     # tiled_ta = tf.ones(shape=[batch_size])
     for name, size, init in zip(names, flat_state_size, flat_initializer):
         shape_with_batch_dim = [1, size]
-        initial_state_variable = tf.get_variable(
-            name, shape=shape_with_batch_dim, initializer=init())
+        initial_state_variable = tf.get_variable(name, shape=shape_with_batch_dim, initializer=init())
 
         # tf.multiply(tiled_ta, initial_state_variable, name=(name + "_tiled"))
         tiled_state = tf.tile(initial_state_variable,
-                              [batch_size, 1],
+                              multiples=[batch_size, 1],
                               name=(name + "_tiled"))
         tiled_states.append(tiled_state)
 
     return nest.pack_sequence_as(structure=state_size,
                                  flat_sequence=tiled_states)
 
-# 选出的index所在的地方必须要mask掉,同时阻止梯度传播
+# 选出的index所在的地方必须要mask掉(mask=1),同时阻止梯度传播
 def update_mask(output_idx, old_mask, seq_length):
     # output_idx: [batch_size]
     # point_mask: [batch_size, seq_length]
@@ -101,9 +100,9 @@ def decoder_intra_attention(decoder_output_previous, query, batch_size, hidden_d
         """用一维卷积来计算全连接"""
         # decoder_output_previous: [batch, decoder_current_len, hidden_dim]
         # W_dec_previous: filter_kernel:[in_width=1, in_channel=hidden_dim, output_channel=hidden_dim]
-        # decoded_previous:[batch, decoder_len, hidden_dim]
+        # decoded_previous: [batch, decoder_current_len, hidden_dim]
         decoded_previous = tf.nn.conv1d(decoder_output_previous, # 全连接转换到另一个物理空间
-                                        W_dec_previous,
+                                        filters=W_dec_previous,
                                         stride=1,
                                         padding="VALID",
                                         name="decoded_previous")  # [batch, decoder_len, hidden_dim]
@@ -477,7 +476,7 @@ def pointer_network_rnn_decoder(cell,
                 _input = first_decoder_input
 
             """
-            在lstm cell中, lstm经过一个时间步后的output: [batch, hidden], 由于并没有多个timestep,所以不需要dynamic_rnn
+            在lstm cell中, lstm经过一个时间步后的output: [batch, hidden], 由于并没有多个timestep, 所以不需要dynamic_rnn
             dec_cell = MultiRNNCell(cells)
             output_i:[batch, hidden_dim], dec_state: {c: [batch_size, hidden_size], h: [batch_size, hidden_size]}
             output_i, dec_state = dec_cell(inputs=cell_input, state=dec_state)
@@ -490,15 +489,15 @@ def pointer_network_rnn_decoder(cell,
             # new_state: {c: [batch_size, hidden_dim], h: [batch_size, hidden_dim]}
             current_cell_output, new_state = cell(_input, state)
 
-            # 先计算decoder当前时间步对之前的各时间间的attention分数
-            # decoder_output_previous:  [batch, decoder_len, hidden_dim
-            # current_cell_output: [batch, hidden_dim]
-            # intra_atten_decode_output: [batch, hidden_dim]
+            # 先计算decoder当前时间步对之前decoder的各时间步的attention分数
+            # decoder_output_previous:  [batch, decoder_len, hidden_dim]
+            # current_cell_output:      [batch, hidden_dim]
+            # intra_atten_decode_output:[batch, hidden_dim]
             intra_atten_decode_output = decoder_intra_attention(decoder_output_previous, current_cell_output, batch_size, hidden_dim)  # [batch_size, hidden_dim]
             # decoder_output_previous:   [decode_seq_length, batch, hidden_dim]
             decoder_output_previous.append(current_cell_output)
 
-            # 计算decoder对各时间步的encoder的attention分数
+            # 计算decoder当前时间步对各时间步的encoder的attention分数
             # encoder_outputs: [batch, seq_len=enc_outputs.seq_len, 2 * hidden_units]
             # current_cell_output: [batch_size, hidden_dim]
             # intra_atten_decode_output: [batch_size, hidden_dim]
@@ -515,7 +514,7 @@ def pointer_network_rnn_decoder(cell,
                 max_logit = tf.reduce_max(logits, axis=None) # scalar, 在所有维上进行max
                 min_logit = tf.reduce_min(logits, axis=None)
                 # 注意:确保先前选过的点不再选, 因为pointer-net中需要保证每个点最多出现一次，
-                # 设置logit为min_logit - 9999，并阻止梯度回传。
+                # 设置logit=1为min_logit - 9999，并阻止梯度回传。
                 # point_mask点为1的代表点不可用, 0代表点可用
                 #
                 # 1.point_mask=1: 点不可用, masked_logits: min_logit - 9999
@@ -528,6 +527,7 @@ def pointer_network_rnn_decoder(cell,
             # logits: [batch, seq_length=enc_output.seq_len]
             # new_state: {c: [batch_size, hidden_dim], h: [batch_size, hidden_dim]}
             return logits, new_state
+
 
         # 注意:encoder的最后一个timestep的state作为decoder的输入!!!
         # enc_final_states: [batch_size, state_size], encoder的最后一个timestep的state
@@ -553,13 +553,13 @@ def pointer_network_rnn_decoder(cell,
                 raise NotImplementedError("invalid mode: %s. Available modes: [SAMPLE, GREEDY]" % mode)
 
             # logits: [batch, seq_len=enc_outputs.seq_len]
-            # output_idx:[batch]
-            output_idx = sample_fn(logits, batch_size)  # [batch_size]
+            # output_idx:[batch], 从encoder_outputs中选出一个sequence index
+            output_idx = sample_fn(logits, batch_size) # [batch_size]
             # output_idxs:[timestep=res_length, batch_size]
             output_idxs = [output_idx]
             # output_idx:[batch_size]
             # point_mask:[batch_size, seq_length=candidate_item_num]
-            point_mask = update_mask(output_idx, point_mask, encoder_seq_length) # 更新mask,防止当前选中的index后面又被选到
+            point_mask = update_mask(output_idx, point_mask, encoder_seq_length) # 更新mask,防止当前选中的index后面又被选到, 当前选中的index的mask设置为1
 
             # result_length = card_item_len
             for i in range(1, result_length): #因为已经选了1个item,所以从1开始
@@ -567,8 +567,8 @@ def pointer_network_rnn_decoder(cell,
                 # states: [batch_size, state_size]
                 # point_mask:[batch_size, seq_length]
                 #
-                # states: [batch_size, state_size]
                 # logits: [batch_size, seq_len=enc_outputs.seq_len=candidate_item_num], 即可以看出是对每个样本中所有encoder timestep计算概率分布
+                # states: [batch_size, state_size]
                 logits, state = call_cell(output_idx, state, point_mask)  # [batch_size, data_len]
 
                 # logits: [batch_size, seq_len=enc_outputs.seq_len]
@@ -596,7 +596,7 @@ def pointer_network_rnn_decoder(cell,
 
         elif mode == "TRAIN":
             # decoder_target_ids:[batch, result_length = card_item_num = 4]
-            # output_idxs:[timestep=res_length, batch_size], tf.unstack将decoder_target_ids在axis=1上解开
+            # output_idxs:[timestep=res_length=card_item_num, batch_size], tf.unstack将decoder_target_ids在axis=1上解开
             output_idxs = tf.unstack(decoder_target_ids, axis=1) # 匹别上面的不同是,我们这里output_idx不需要采样
 
             # output_idx: [batch_size]
@@ -612,10 +612,12 @@ def pointer_network_rnn_decoder(cell,
                 # state: [batch_size, state_size]
                 # point_mask: [batch_size, seq_length]
                 logits, state = call_cell(output_idx, state, point_mask)  # [batch_size, data_len]
+
                 # output_logits: [timestep=res_length, batch_size, seq_len=enc_outputs.seq_len]
                 output_logits.append(logits)
                 # output_idxs:[timestep=res_length,batch_size]
                 # output_idx: [batch_size]
+
                 output_idx = output_idxs[i]  # [batch_size]
                 # output_idx: [batch_size]
                 # point_mask: [batch_size, seq_length]

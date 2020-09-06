@@ -24,9 +24,9 @@ class Generator():
 
         # define decoder inputs
         # decode_target_item_idx: [batch, result_length=card_item_num=4]
-        self.decode_target_item_idx = tf.placeholder(dtype=tf.int32,
-                                                     shape=[hp.batch_size, hp.result_length],  # [batch, card_item_num]
-                                                     name="decoder_target_ids")  # [batch_size, res_length]
+        self.sampled_target_item_idx = tf.placeholder(dtype=tf.int32,
+                                                      shape=[hp.batch_size, hp.result_length],  # [batch, card_item_num]
+                                                      name="decoder_target_ids")  # [batch_size, res_length]
         # reward:[batch]
         self.reward = tf.placeholder(dtype=tf.float32,
                                      shape=[hp.batch_size],
@@ -73,7 +73,7 @@ class Generator():
             if hp.use_multihead_attention:
                 ## Blocks
                 for i in range(hp.num_blocks): # 2层transformer
-                    with tf.variable_scope("num_blocks_{}".format(i)):
+                    with tf.variable_scope("num_blocks_{}".format(i)): # 每个不同的层,是不同的variable_scope,即各层之间参数不共享
                         ### Multihead self Attention
                         # encoder: [batch, seq_len, 2*hidden_units]
                         #       => [batch, seq_len, 2*hidden_units]
@@ -107,7 +107,7 @@ class Generator():
             encoder_init_state = trainable_initial_state(hp.batch_size, decoder_cell.state_size)
 
             # ==============================================================================================================
-            # pointer-network sampling
+            # pointer-network sampling, 从各个时间步的encoder中进行采样
             # encoder: [batch, seq_length=candidate_item_num, 2*hidden_units]
             # =>
             # sampled_logits: [batch_size, res_length=card_item_num=4, seq_length=enoder_outputs.seq_len=candidate_item_num],
@@ -138,18 +138,19 @@ class Generator():
             self.sampled_item_seq = batch_gather(self.candidate_item, self.sampled_item_index) # 将item index转换为真正的item_id
 
             # ==============================================================================================================
-            # 训练得到decoder_sample_logits, 注意:这里输入的decode_target_item_idx是我们模型采样出来的item index,而不是我们真正ground truth的card_item_index!!!
+            # 训练得到decoder_sample_logits, 注意:这里输入的decode_target_item_idx是我们generator模型采样出来的item index,
+            # 而不是我们真正ground truth的card_item_index!!!
             # self.decode_target_item_idx: [batch, result_length=card_item_num=4]
             # encoder: [batch, seq_len=cadidate_item_num, 2*hidden_units]
             # decoder_sample_logits: [batch_size, res_length=card_item_num=4, seq_length=enoder_outputs.seq_len], 即可以看出是对每个样本中所有encoder timestep计算概率分布
             decoder_sample_logits, _ = pointer_network_rnn_decoder(
                 cell=decoder_cell,
-                decoder_target_ids=self.decode_target_item_idx, # [batch, result_length=card_item_num=4],
+                decoder_target_ids=self.sampled_target_item_idx, # [batch, result_length=card_item_num=4],
                 # 从代码中看,这里输入的decode_target_item_idx是我们模型采样出来的item index,而不是我们真正ground truth的card_item_index
                 encoder_outputs=self.encoder,
                 enc_final_states=encoder_init_state,
                 encoder_seq_length=hp.encoder_seq_length, # candidate_item_num
-                result_length=hp.result_length,
+                result_length=hp.result_length, # card_item_num
                 hidden_dim=hp.hidden_units*2,
                 num_glimpse=hp.num_glimpse,
                 batch_size=hp.batch_size,
@@ -160,7 +161,7 @@ class Generator():
             self.decoder_sample_logits = tf.identity(decoder_sample_logits, name="dec_logits")
 
             # ==============================================================================================================
-            # 不明白decoder_logits与supervised_logits有什么不同
+            # supervised_logits中的card_item_idx是真实的card item label, 不同于decoder_sample_logits中是采样出来的item
             # encoder: [batch, seq_len=cadidate_item_num, 2*hidden_units]
             # supervised_logits: [batch_size, res_length=card_item_num=4, seq_length=enoder_outputs.seq_len]
             supervised_logits, _ = pointer_network_rnn_decoder(
@@ -180,7 +181,7 @@ class Generator():
             self.supervised_logits = tf.identity(supervised_logits, name="supervised_logits")
 
             # ==============================================================================================================
-            # beamsearch推断网络,即预测target_id_index
+            # beamsearch推断网络,即预测target_id_index,搜索一个最好的item序列
             # infer_card_item_idx: [batch_size, res_length=card_item_num=4]
             _, infer_card_item_idx, _ = pointer_network_rnn_decoder(
                 cell=decoder_cell,
@@ -208,16 +209,16 @@ class Generator():
             # Loss
             # decoder_sample_logits: [batch_size, res_length=card_item_num=4, seq_length=enoder_outputs.seq_len]
             # decode_target_item_idx: [batch, result_length=card_item_num=4]
-            # reinforcement_loss: [batch, result_length], 这个loss能够称为强化学习的loss?
+            # reinforcement_loss: [batch, result_length], 这个loss能够称为强化学习的loss,因为是采样来的吗?
             self.reinforcement_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=self.decoder_sample_logits,  # 对于sparse_softmax函数,labels不用one-hot
-                                                                                     labels=self.decode_target_item_idx)
+                                                                                     labels=self.sampled_target_item_idx)
 
             # decoder_sample_logits: [batch_size, res_length=card_item_num=4, seq_length=enoder_outputs.seq_len]
             # card_item_idx:   [batch, result_length=card_item_num=4]
             # supervised_loss: [batch, result_length]
             if hp.schedule_sampling:
                 self.supervised_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=self.decoder_sample_logits,
-                                                                                      labels=self.card_item_idx)
+                                                                                      labels=self.card_item_idx) # 真实的有监督的card item
             else:
                 self.supervised_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=self.supervised_logits,
                                                                                       labels=self.card_item_idx)
@@ -230,8 +231,8 @@ class Generator():
             # TODO:不明白为何reward乘以loss就是policy_loss
             self.policy_loss = tf.reduce_mean(tf.reduce_sum(self.reinforcement_loss, axis=1) * self.reward)
 
-            # supervised loss
-            # scalar
+            # supervised_loss: [batch, result_length]
+            # =>: scalar
             self.supervised_loss = tf.reduce_mean(tf.reduce_sum(self.supervised_loss, axis=1))
             # 强化学习的loss+有监督学习的loss相加
             # policy_loss:scalar
@@ -258,6 +259,7 @@ class Discriminator():
         # label:[batch]
         # num_batch:scalar
         if is_training: #训练
+            # 此处user,card_item等都已经是tensor
             self.user, self.card_item, self.label, self.num_batch = get_discriminator_batch_data(is_training=True)
         elif is_testing: # 测试
             self.user, self.card_item, self.label, self.num_batch = get_discriminator_batch_data(is_training=False)

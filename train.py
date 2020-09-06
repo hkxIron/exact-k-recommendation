@@ -36,11 +36,12 @@ if __name__ == '__main__':
         discriminator = Discriminator(is_training=True, is_testing=False)
     print("disriminator variable count:", len(tf.get_variable_scope().global_variables()))
 
+    # 先定义了generator,discriminator,后面的都是复用原来的图就行了,因此都是reuser_variables
     tf.get_variable_scope().reuse_variables() # variables重用
     with tf.name_scope('DiscriminatorInfer'):
         discriminator_infer = Discriminator(is_training=False, is_testing=False)
 
-    with tf.name_scope('DiscriminatorTest'):
+    with tf.name_scope('DiscriminatorTest'): # name_scope只是在graph分组时使用
         discriminator_test = Discriminator(is_training=False, is_testing=True)
 
     with tf.name_scope('GeneratorInfer'):
@@ -136,7 +137,6 @@ if __name__ == '__main__':
         # 恢复最好的discriminator
         sv.saver.restore(sess, hp.logdir + '/model/best_model')
 
-
         # 2.再训练Generator
         print('Generator training start!')
         # 记录sample到的最好的结果
@@ -207,7 +207,6 @@ if __name__ == '__main__':
                     # sampled_card_item_idx: [batch_size, res_length=card_item_num]
                     # reward:[batch]
                     (sampled_card_item, sampled_card_item_idx, reward) = zip(*samples)
-
                 else:
                     # B.只用一路采样
                     # 用generator生成序列, 与爬山法不同, 每个user只采样一次
@@ -233,8 +232,8 @@ if __name__ == '__main__':
                                 reward.append(-1.0)
 
                 # train generator
-                sess.run(generator.train_op, feed_dict={generator.decode_target_item_idx: sampled_card_item_idx, # 采样的card_item_index作为target
-                                                        generator.reward: reward, # 生成器采样的序列产生的reward
+                sess.run(generator.train_op, feed_dict={generator.sampled_target_item_idx: sampled_card_item_idx,  # 采样的card_item_index作为target
+                                                        generator.reward: reward,  # 生成器采样的序列产生的reward
                                                         generator.candidate_item: candidate_item,
                                                         generator.user: user,
                                                         generator.card_item_idx: card_item_idx})
